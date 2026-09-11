@@ -1,0 +1,15 @@
+{
+  "_comment": "Sao chép thành my-servers.json rồi điền host/port/base_path của từng node. Certs do server sinh trong ~/.evilginx/api/ của node — copy ca.crt, client.crt, client.key về PC.",
+  "servers": [
+    {
+      "name": "node-1",
+      "host": "192.168.80.68",
+      "port": 9443,
+      "base": "/api-XXXXXXXXXXXX",
+      "ca": "certs/node1/ca.crt",
+      "cert": "certs/node1/client.crt",
+      "key": "certs/node1/client.key"
+    }
+  ],
+  "_usage": "python3 tools/egctl.py servers.json status|phishlets|sessions|enable <pl>|disable <pl>|lure-create <pl> [url]|lure-url <pl> <id> [k=v]|session-del <id>"
+}

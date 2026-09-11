@@ -1,0 +1,46 @@
+# Git ignore — fake-evilginx-pro
+
+# build artifacts
+/evilginx2
+/evilpuppet-lite
+*.test
+src/evilginx2
+src/evilpuppet-lite
+
+# runtime state (không bao giờ commit)
+.evilginx/
+*.db
+*.db-wal
+*.db-shm
+blacklist.txt
+certs/
+crt/
+
+# operator local files
+my-servers.json
+servers.json
+webhook_rx.log
+testsite.log
+serve*.log
+jar*.txt
+probe_page.html
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# SECRETS — khong bao gio commit
+tools/api-certs-vps/
+tools/api-certs-*/
+*.pem
+*.key
+deploy/.env
+campaign-token*
+
+# operator console SSH config (chứa IP/key path — dùng console.example.json làm mẫu)
+console.json
+
+# campaign phishlets — KHÔNG commit (thiết kế: repo public không ship phishlet thật,
+# comment trong phishlet chứa chi tiết campaign). Ví dụ lab nằm ở examples/phishlets/
+src/phishlets/*.yaml

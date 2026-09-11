@@ -1,0 +1,7 @@
+{
+  "ssh": {
+    "host": "<VPS_IP>",
+    "user": "ubuntu",
+    "key": "C:/path/to/ssh-key.pem"
+  }
+}

