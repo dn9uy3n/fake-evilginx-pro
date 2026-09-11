@@ -334,6 +334,14 @@ func (c *Config) SaveConfig() {
 	c.cfg.WriteConfig()
 }
 
+// SaveProxyConfig syncs the in-memory ProxyConfig back into the settings store
+// and writes config.json. Required after DIRECT field assignments on
+// proxyConfig — the underlying store keeps its own raw copy of the block.
+func (c *Config) SaveProxyConfig() {
+	c.cfg.Set(CFG_PROXY, c.proxyConfig)
+	c.cfg.WriteConfig()
+}
+
 func (c *Config) EnableProxy(enabled bool) {
 	c.proxyConfig.Enabled = enabled
 	c.cfg.Set(CFG_PROXY, c.proxyConfig)

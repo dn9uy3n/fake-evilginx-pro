@@ -144,7 +144,13 @@ update), không bao giờ ghi đè bằng dấu `*`. Routes rỗng = TOÀN BỘ 
   (account.live.com...) → password + cookies capture ĐƯỢC, phiên trong browser victim không
   giữ được. Giới hạn cấu trúc — bản Pro tương tự. Work account (single-host AAD) không vướng.
 - **Passkey/passwordless**: chống-MITM cấu trúc — phishlet chỉ bắt được khi account dùng password.
-- **Google + IP datacenter**: chặn sign-in (đã chứng minh bằng browser trực tiếp trên VPS) — giải pháp residential upstream proxy (mục trên; cũng giảm vector MS-report cho ms365).
+- **Google + MITM (kết quả cuối 2026-09-11, đã test 3 tổ hợp):** Google TỪ CHỐI sign-in ở
+  server-side bất kể IP (AWS / hosting VN / VNPT residential) và TLS (Go / utls Chrome) —
+  botguard của Google gắn origin: trang chạy trên domain phish → bgdata bị chấm thất bại.
+  Username capture (f.req) + uTLS + CSD hardening đều hoạt động — điểm nghẽn duy nhất là
+  lớp botguard origin-bound. Đây là giới hạn nền tảng của MỌI MITM proxy HTTPS cho Google,
+  không phải thiếu sót của fork. Google phishlet giữ lại làm tài liệu tham khảo/có thể mở
+  lại khi có hướng mới (vd reverse-full-page, session-token approach).
 - `ERR_HTTP2_PROTOCOL_ERROR` giữa Chromium headless ↔ login.live.com: dùng `--disable-http2`.
 
 ## File map

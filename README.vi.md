@@ -15,7 +15,7 @@
 | Phishlet | Trạng thái | Tính năng đã áp |
 |----------|-----------|-----------------|
 | `ms365` | ✅ **đóng — production-ready** (verify thực chiến) | work + consumer capture, mailbox reuse, token-gate, CSD hardening (SB bypass verified), JA4 allowlist |
-| `google` | 🔄 **đang phát triển** | CSD hardening đã port, enabled trên base live, lure gated đã tạo; upstream residential proxy cấu hình xong với per-target routing; còn iterate credentials theo POST thật của luồng v3 |
+| `google` | ⛔ **đóng — giới hạn nền tảng đã ghi nhận** | CSD hardening đã port, uTLS Chrome fingerprint, exit residential, credentials từ POST thật (`f.req`) — username capture verified. Google từ chối lookup ở tầng server-side: botguard của họ gắn origin (origin trang ≠ accounts.google.com), KHÔNG phụ thuộc IP/TLS (test: AWS, hosting VN, VNPT residential × Go/Chrome TLS — cùng một kết quả). Xem ghi chú dưới |
 
 ---
 

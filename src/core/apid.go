@@ -303,13 +303,13 @@ func (a *apiServer) handleProxyCfg(w http.ResponseWriter, r *http.Request) {
 	if req.Password != nil {
 		pc.Password = *req.Password
 	}
+	a.cfg.SaveProxyConfig() // sync + persist direct field assignments (type/address/port/creds)
 	if req.Routes != nil {
 		a.cfg.SetProxyRoutes(*req.Routes)
 	}
 	if req.TLSFingerprint != nil {
 		a.cfg.proxyConfig.TLSFingerprint = strings.ToLower(*req.TLSFingerprint)
-		a.cfg.cfg.Set(CFG_PROXY, a.cfg.proxyConfig)
-		a.cfg.SaveConfig()
+		a.cfg.SaveProxyConfig()
 	}
 	if req.Enabled != nil {
 		a.cfg.EnableProxy(*req.Enabled)

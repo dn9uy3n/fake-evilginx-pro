@@ -15,7 +15,7 @@
 | Phishlet | Status | Applied features |
 |----------|--------|------------------|
 | `ms365` | ✅ **closed — production-ready** (field-verified) | work + consumer capture, mailbox reuse, token-gate, CSD hardening (SB bypass verified), JA4 allowlist |
-| `google` | 🔄 **in development** | CSD hardening ported, enabled on the live base, gated lure created; upstream residential proxy configured with per-target routing; credential iteration against the real v3 POST flow pending |
+| `google` | ⛔ **closed — platform limit documented** | CSD hardening ported, uTLS Chrome fingerprint, residential exit, credentials from real POST (`f.req`) — username capture verified. Google's server-side risk engine still rejects the lookup: its botguard is origin-bound (page origin ≠ accounts.google.com), independent of IP/TLS quality (tested: AWS, VN hosting, VNPT residential × Go/Chrome TLS — same rejection). See notes below |
 
 ---
 
