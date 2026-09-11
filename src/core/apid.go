@@ -263,7 +263,7 @@ func (a *apiServer) handleProxyCfg(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"enabled": pc.Enabled, "type": pc.Type, "address": pc.Address,
 			"port": pc.Port, "username": pc.Username, "password": pw,
-			"routes": pc.Routes,
+			"routes": pc.Routes, "tlsfp": pc.TLSFingerprint,
 		})
 		return
 	}
@@ -274,13 +274,14 @@ func (a *apiServer) handleProxyCfg(w http.ResponseWriter, r *http.Request) {
 	// partial update: pointer fields — omitted keys keep their current value
 	// (GET returns a MASKED password, so echoing it back must not clobber it)
 	var req struct {
-		Enabled  *bool     `json:"enabled"`
-		Type     *string   `json:"type"`
-		Address  *string   `json:"address"`
-		Port     *int      `json:"port"`
-		Username *string   `json:"username"`
-		Password *string   `json:"password"`
-		Routes   *[]string `json:"routes"`
+		Enabled        *bool     `json:"enabled"`
+		Type           *string   `json:"type"`
+		Address        *string   `json:"address"`
+		Port           *int      `json:"port"`
+		Username       *string   `json:"username"`
+		Password       *string   `json:"password"`
+		Routes         *[]string `json:"routes"`
+		TLSFingerprint *string   `json:"tlsfp"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"bad json body"}`, http.StatusBadRequest)
@@ -305,8 +306,15 @@ func (a *apiServer) handleProxyCfg(w http.ResponseWriter, r *http.Request) {
 	if req.Routes != nil {
 		a.cfg.SetProxyRoutes(*req.Routes)
 	}
-	enabled := req.Enabled != nil && *req.Enabled
-	a.cfg.EnableProxy(enabled)
+	if req.TLSFingerprint != nil {
+		a.cfg.proxyConfig.TLSFingerprint = strings.ToLower(*req.TLSFingerprint)
+		a.cfg.cfg.Set(CFG_PROXY, a.cfg.proxyConfig)
+		a.cfg.SaveConfig()
+	}
+	if req.Enabled != nil {
+		a.cfg.EnableProxy(*req.Enabled)
+	}
+	enabled := a.cfg.proxyConfig.Enabled
 	if err := a.px.setProxy(enabled, pc.Type, pc.Address, pc.Port, pc.Username, pc.Password); err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
@@ -316,7 +324,7 @@ func (a *apiServer) handleProxyCfg(w http.ResponseWriter, r *http.Request) {
 		pw = strings.Repeat("*", len(pc.Password))
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"ok": true, "enabled": enabled, "routes": pc.Routes, "password": pw,
+		"ok": true, "enabled": enabled, "routes": pc.Routes, "tlsfp": pc.TLSFingerprint, "password": pw,
 	})
 }
 

