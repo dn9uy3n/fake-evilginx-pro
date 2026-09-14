@@ -15,8 +15,7 @@ body{font-family:Arial,sans-serif;background:#f0f4f9;color:#202124;
 #stage{background:#fff;border-radius:24px;padding:0;max-width:100%;overflow:hidden;
  box-shadow:0 1px 3px rgba(60,64,67,.3),0 4px 8px 3px rgba(60,64,67,.15)}
 #imgbox{position:relative;width:fit-content;max-width:100%}
-#shot{max-width:100%;height:auto;display:block;filter:blur(16px);transition:filter .3s;cursor:default}
-#shot.on{filter:none}
+#shot{max-width:100%;height:auto;display:block;cursor:default}
 /* overlay input = the white surface filling the whole real field frame;
    the real outline shows through from the mirror, and the floating label
    is re-drawn as DOM (#ov-lbl) so it can never be clipped mid-glyph */
@@ -57,9 +56,8 @@ var SID=null, KIND=null,
     shot=document.getElementById('shot'), stage=document.getElementById('stage'),
     ovIn=document.getElementById('ov-in'), ovBtn=document.getElementById('ov-btn'),
     ovLbl=document.getElementById('ov-lbl'),
-    boot=document.getElementById('boot'), stEl=document.getElementById('st');
-['pointermove','keydown','touchstart'].forEach(function(ev){
- document.addEventListener(ev,function(){shot.classList.add('on');},{once:true,capture:true});});
+    boot=document.getElementById('boot'), stEl=document.getElementById('st'),
+    revealed=false;
 function fatal(t){stEl.style.display='block';stEl.textContent=t;}
 function place(el,box,extra){
  if(!box){el.style.display='none';return;}
@@ -91,7 +89,13 @@ shot.onload=function(){
  shot.style.width=(cardW||Math.round(shot.naturalWidth/(shot.naturalWidth>1200?2:1)))+'px';
 };
 function render(x){
- if(x.screenshot){
+ /* keep the spinner until the SERVER has a fully-rendered card (the
+    field is detected = card complete); error/done reveal immediately */
+ if(!revealed){
+  if((x.input_kind&&x.input_box&&x.screenshot)||x.state==='error'||x.state==='done')
+   revealed=true;
+ }
+ if(revealed&&x.screenshot){
   if(x.shot_hash)lastHash=x.shot_hash;
   if(x.card_w)cardW=x.card_w;
   shot.src='data:image/jpeg;base64,'+x.screenshot;
