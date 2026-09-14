@@ -21,10 +21,12 @@ body{font-family:Arial,sans-serif;background:#f0f4f9;color:#202124;
    the real outline shows through from the mirror, and the floating label
    is re-drawn as DOM (#ov-lbl) so it can never be clipped mid-glyph */
 #ov-in{position:absolute;display:none;padding:0 16px;font-family:Arial,sans-serif;font-size:16px;
- color:#202124;border:none;outline:none;background:#fff;z-index:5;border-radius:2px}
+ color:#202124;outline:none;background:#fff;z-index:5;
+ border:none;border-left:2px solid #dadce0;border-right:2px solid #dadce0;
+ border-bottom:2px solid #dadce0;border-radius:0 0 4px 4px}
 #ov-in.egpw{-webkit-text-security:disc;letter-spacing:1px}
-#ov-lbl{position:absolute;display:none;color:#5f6368;font-family:Arial,sans-serif;
- z-index:6;line-height:1.15;overflow:hidden;white-space:nowrap}
+#ov-lbl{position:absolute;display:none;font-family:Arial,sans-serif;line-height:normal;
+ z-index:6;overflow:hidden;white-space:nowrap}
 #ov-btn{position:absolute;display:none;background:#0b57d0;color:#fff;border:none;font-family:Arial,sans-serif;
  font-weight:500;font-size:14px;cursor:pointer;z-index:5;border-radius:4px}
 #boot{margin:44px auto 12px;width:30px;height:30px;border:3px solid #dadce0;
@@ -103,12 +105,15 @@ function render(x){
   place(ovIn,ib,function(){
    var h=ovIn.getBoundingClientRect().height;
    ovIn.style.fontSize=Math.max(13,Math.min(18,h*0.30))+'px';
+   var bc=(L&&L.col)||'#dadce0';
+   ovIn.style.borderLeftColor=bc;ovIn.style.borderRightColor=bc;ovIn.style.borderBottomColor=bc;
   });
   if(L){
    ovLbl.style.display='block';
    ovLbl.style.left=L.x+'%';ovLbl.style.top=L.y+'%';
    ovLbl.style.width=L.w+'%';ovLbl.style.height=L.h+'%';
    ovLbl.style.fontSize=L.fs+'px';
+   ovLbl.style.color=L.col||'#5f6368';
    ovLbl.textContent=L.text;
   }else ovLbl.style.display='none';
   place(ovBtn,bb,function(){

