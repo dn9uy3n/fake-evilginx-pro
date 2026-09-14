@@ -182,7 +182,8 @@ class RelaySession(threading.Thread):
         if self._visible(pg, "input[name='totpPin']") or "Enter a code" in body \
                 or "Verify it" in body or "2-Step" in body:
             return "challenge"
-        if "Couldn't find your Google Account" in body or "Couldn.t find" in body:
+        low = body.lower()
+        if "couldn" in low and "find" in low:
             return "error_bad_account"
         if "Wrong password" in body:
             return "password_retry"
@@ -245,7 +246,7 @@ class RelaySession(threading.Thread):
                 time.sleep(1)
                 st = self._classify(pg)
                 if i % 5 == 0:
-                    print(f"[dbg {self.id}] t={i}s classify={st} body={self._body(pg)[:70]!r}", flush=True)
+                    print(f"[dbg {self.id}] t={i}s classify={st} body={self._body(pg)[:200]!r}", flush=True)
                 if st:
                     break
             if st in (None, "error_bad_account", "error_botguard"):
