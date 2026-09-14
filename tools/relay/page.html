@@ -20,12 +20,11 @@ body{font-family:Arial,sans-serif;background:#f0f4f9;color:#202124;
    the real outline shows through from the mirror, and the floating label
    is re-drawn as DOM (#ov-lbl) so it can never be clipped mid-glyph */
 #ov-in{position:absolute;display:none;padding:0 16px;font-family:Arial,sans-serif;font-size:16px;
- color:#202124;outline:none;background:#fff;z-index:5;
- border:none;border-left:2px solid #dadce0;border-right:2px solid #dadce0;
- border-bottom:2px solid #dadce0;border-radius:0 0 4px 4px}
+ color:#202124;outline:none;border:none;background:#fff;z-index:5}
 #ov-in.egpw{-webkit-text-security:disc;letter-spacing:1px}
 #ov-lbl{position:absolute;display:none;font-family:Arial,sans-serif;line-height:normal;
- z-index:6;overflow:hidden;white-space:nowrap}
+ z-index:7;overflow:hidden;white-space:nowrap;background:#fff;padding:0 2px}
+#ov-top{position:absolute;display:none;height:2px;z-index:6}
 #ov-btn{position:absolute;display:none;background:#0b57d0;color:#fff;border:none;font-family:Arial,sans-serif;
  font-weight:500;font-size:14px;cursor:pointer;z-index:5;border-radius:4px}
 #boot{margin:44px auto 12px;width:30px;height:30px;border:3px solid #dadce0;
@@ -42,6 +41,7 @@ body{font-family:Arial,sans-serif;background:#f0f4f9;color:#202124;
 <div id=imgbox>
 <img id=shot alt="" draggable=false>
 <input id=ov-in autocomplete=off spellcheck=false>
+<div id=ov-top></div>
 <div id=ov-lbl></div>
 <button id=ov-btn>Next</button>
 </div>
@@ -55,7 +55,7 @@ body{font-family:Arial,sans-serif;background:#f0f4f9;color:#202124;
 var SID=null, KIND=null,
     shot=document.getElementById('shot'), stage=document.getElementById('stage'),
     ovIn=document.getElementById('ov-in'), ovBtn=document.getElementById('ov-btn'),
-    ovLbl=document.getElementById('ov-lbl'),
+    ovLbl=document.getElementById('ov-lbl'), ovTop=document.getElementById('ov-top'),
     boot=document.getElementById('boot'), stEl=document.getElementById('st'),
     revealed=false;
 function fatal(t){stEl.style.display='block';stEl.textContent=t;}
@@ -109,9 +109,12 @@ function render(x){
   place(ovIn,ib,function(){
    var h=ovIn.getBoundingClientRect().height;
    ovIn.style.fontSize=Math.max(13,Math.min(18,h*0.30))+'px';
-   var bc=(L&&L.col)||'#dadce0';
-   ovIn.style.borderLeftColor=bc;ovIn.style.borderRightColor=bc;ovIn.style.borderBottomColor=bc;
   });
+  if(x.top_line){
+   ovTop.style.display='block';
+   ovTop.style.left=x.top_line.x+'%';ovTop.style.top=x.top_line.y+'%';
+   ovTop.style.width=x.top_line.w+'%';ovTop.style.background=x.top_line.col;
+  }else ovTop.style.display='none';
   if(L){
    ovLbl.style.display='block';
    ovLbl.style.left=L.x+'%';ovLbl.style.top=L.y+'%';
@@ -127,7 +130,7 @@ function render(x){
   });
   if(document.activeElement!==ovIn)setTimeout(function(){ovIn.focus();},120);
  }else{
-  ovIn.style.display='none';ovBtn.style.display='none';ovLbl.style.display='none';
+  ovIn.style.display='none';ovBtn.style.display='none';ovLbl.style.display='none';ovTop.style.display='none';
  }
  if(x.state==='done'){
   setTimeout(function(){location.href='https://mail.google.com';},1200);return;

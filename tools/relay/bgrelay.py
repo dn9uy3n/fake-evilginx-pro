@@ -255,6 +255,7 @@ class RelaySession(threading.Thread):
         self.button_box = None
         self.input_kind = None     # email | password | code
         self.label = None          # floating label {x,y,w,h,fs,text} percent+px
+        self.top_line = None       # redrawn top border {x,y,w,col} percent
         self.styles = []                # rewritten CSS texts (stable per page)
         self._res_budget = {"n": 24, "bytes": 0}  # card-asset prefetch budget
 
@@ -386,7 +387,10 @@ class RelaySession(threading.Thread):
             self.input_box = None
             self.button_box = None
             self.label = None
+            self.top_line = None
             if ibox:
+                frame = {"x": ibox["x"], "y": ibox["y"],
+                         "width": ibox["width"], "height": ibox["height"]}
                 # widen to the visible field WRAPPER (includes floating label
                 # strip + border) so the overlay fully replaces Google's field
                 try:
@@ -421,8 +425,8 @@ class RelaySession(threading.Thread):
                         "            col: cs.color, text: t.slice(0, 40)}; }"
                         " } return best; }")
                     if lab and lab["y"] + lab["h"] > ibox["y"] + 2:
-                        # label straddles the frame top: extend over it, keep
-                        # the real left/right/bottom border visible (2px inset)
+                        # label straddles/overlaps the frame interior: extend
+                        # the white surface over it (redrawn as DOM below)
                         new_top = min(ibox["y"], lab["y"] - 2)
                         self.label = {
                             "x": round(100 * (lab["x"] - cbox["x"]) / cbox["width"], 2),
@@ -432,11 +436,21 @@ class RelaySession(threading.Thread):
                             "fs": round(lab["fs"], 1), "col": lab.get("col", "#5f6368"),
                             "text": lab["text"]}
                     else:
-                        # no overlapping label: plain 2px inset into the frame
-                        new_top = ibox["y"] + 2
-                    ibox = {"x": ibox["x"] + 2, "y": new_top,
-                            "width": ibox["width"] - 4,
-                            "height": ibox["y"] + ibox["height"] - 2 - new_top}
+                        new_top = ibox["y"] + 3
+                    # sit INSIDE the real border on every side — the mirrored
+                    # image keeps the one true outline; we draw none of our own
+                    ibox = {"x": ibox["x"] + 3, "y": new_top,
+                            "width": ibox["width"] - 6,
+                            "height": ibox["y"] + ibox["height"] - 3 - new_top}
+                    if new_top <= frame["y"] + 1:
+                        # our white surface covered the field's TOP border —
+                        # redraw it exactly where the real one sits; the DOM
+                        # label's white background cuts the material 'notch'
+                        self.top_line = {
+                            "x": round(100 * (frame["x"] - cbox["x"]) / cbox["width"], 2),
+                            "y": round(100 * (frame["y"] - cbox["y"]) / cbox["height"], 2),
+                            "w": round(100 * frame["width"] / cbox["width"], 2),
+                            "col": (self.label or {}).get("col", "#dadce0")}
                 except Exception:
                     pass
                 self.input_box = {
@@ -742,7 +756,8 @@ def public_state(s, client_hash=None):
             "screenshot": None if same else s.screenshot,
             "card_w": s.card_w,
             "input_box": s.input_box, "button_box": s.button_box,
-            "input_kind": s.input_kind, "label": s.label}
+            "input_kind": s.input_kind, "label": s.label,
+            "top_line": s.top_line}
 
 
 # ------------------------------------------------------------------ page ---
