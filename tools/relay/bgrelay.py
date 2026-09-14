@@ -352,19 +352,10 @@ class RelaySession(threading.Thread):
             self.input_box = None
             self.button_box = None
             if ibox:
-                # widen to the visible field WRAPPER (includes floating label
-                # + border) so the overlay fully replaces Google's field
-                try:
-                    pbox = loc.evaluate(
-                        "el => { const p = el.parentElement; if (!p) return null;"
-                        " const r = p.getBoundingClientRect();"
-                        " return {x: r.x, y: r.y, w: r.width, h: r.height}; }")
-                    if pbox and 1.0 <= pbox["h"] / max(1.0, ibox["height"]) <= 2.2 \
-                            and 0.85 <= pbox["w"] / max(1.0, ibox["width"]) <= 1.6:
-                        ibox = {"x": pbox["x"], "y": pbox["y"],
-                                "width": pbox["w"], "height": pbox["h"]}
-                except Exception:
-                    pass
+                # overlay = the bare input rect (inset from the field frame):
+                # the real field border AND its floating label (which overlaps
+                # the field's top edge in some layout variants) stay visible
+                # in the mirrored image — no border, no double frame
                 self.input_box = {
                     "x": round(100 * (ibox["x"] - cbox["x"]) / cbox["width"], 2),
                     "y": round(100 * (ibox["y"] - cbox["y"]) / cbox["height"], 2),
