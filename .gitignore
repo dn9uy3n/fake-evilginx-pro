@@ -44,3 +44,4 @@ console.json
 # campaign phishlets — KHÔNG commit (thiết kế: repo public không ship phishlet thật,
 # comment trong phishlet chứa chi tiết campaign). Ví dụ lab nằm ở examples/phishlets/
 src/phishlets/*.yaml
+__pycache__/
