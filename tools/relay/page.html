@@ -109,6 +109,11 @@ function render(x){
   place(ovIn,ib,function(){
    var h=ovIn.getBoundingClientRect().height;
    ovIn.style.fontSize=Math.max(13,Math.min(18,h*0.30))+'px';
+   /* push the caret below the label strip so typed text sits centered in
+      the real entry area, exactly like the genuine page */
+   var shotH=shot.getBoundingClientRect().height, pad=8;
+   if(L) pad=Math.max(8,Math.round((L.y+L.h-ib.y)/100*shotH)+4);
+   ovIn.style.paddingTop=pad+'px';
   });
   if(x.top_line){
    ovTop.style.display='block';
