@@ -23,7 +23,7 @@ body{font-family:Arial,sans-serif;background:#f0f4f9;color:#202124;
  color:#202124;outline:none;border:none;background:#fff;z-index:5}
 #ov-in.egpw{-webkit-text-security:disc;letter-spacing:1px}
 #ov-lbl{position:absolute;display:none;font-family:Arial,sans-serif;line-height:normal;
- z-index:7;overflow:hidden;white-space:nowrap;background:#fff;padding:0 2px}
+ z-index:7;background:#fff;padding:0 4px;white-space:nowrap;width:auto!important}
 #ov-top{position:absolute;display:none;height:2px;z-index:6}
 #ov-btn{position:absolute;display:none;background:#0b57d0;color:#fff;border:none;font-family:Arial,sans-serif;
  font-weight:500;font-size:14px;cursor:pointer;z-index:5;border-radius:4px}
@@ -118,7 +118,6 @@ function render(x){
   if(L){
    ovLbl.style.display='block';
    ovLbl.style.left=L.x+'%';ovLbl.style.top=L.y+'%';
-   ovLbl.style.width=L.w+'%';ovLbl.style.height=L.h+'%';
    ovLbl.style.fontSize=L.fs+'px';
    ovLbl.style.color=L.col||'#5f6368';
    ovLbl.textContent=L.text;
